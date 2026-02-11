@@ -129,6 +129,12 @@ nanobot agent -m "What is 2+2?"
 
 That's it! You have a working AI assistant in 2 minutes.
 
+## Desktop App (Tauri)
+
+If you want a local UI to start/stop the agent and gateway, view logs, and manage sessions/skills/memory,
+use the desktop app in `nanobot-desktop/`. Setup and dev/build steps are in `nanobot-desktop/README.md`.
+
+
 ## 🖥️ Local Models (vLLM)
 
 Run nanobot with your own local models using vLLM or any OpenAI-compatible server.
