@@ -1,0 +1,53 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Nanobot Desktop",
+  "version": "0.1.0",
+  "identifier": "com.nanobot.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run prepare:runtime && npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nanobot Desktop",
+        "width": 1100,
+        "height": 760,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.ico",
+      "iconAsTemplate": false,
+      "tooltip": "Nanobot Desktop",
+      "showMenuOnLeftClick": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "msi",
+      "dmg",
+      "app",
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "resources": [
+      "resources/python",
+      "resources/site-packages",
+      "resources/runtime_manifest.txt"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  },
+  "plugins": {}
+}

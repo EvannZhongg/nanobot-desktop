@@ -407,6 +407,7 @@ def agent(
     session_id: str = typer.Option("cli:default", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    daemon: bool = typer.Option(False, "--daemon/--no-daemon", help="Run agent loop as a background service"),
 ):
     """Interact with the agent directly."""
     from nanobot.config.loader import load_config
@@ -449,6 +450,14 @@ def agent(
             _print_agent_response(response, render_markdown=markdown)
         
         asyncio.run(run_once())
+    elif daemon:
+        async def run_daemon():
+            await agent_loop.run()
+
+        try:
+            asyncio.run(run_daemon())
+        except KeyboardInterrupt:
+            console.print("\nShutting down...")
     else:
         # Interactive mode
         _init_prompt_session()

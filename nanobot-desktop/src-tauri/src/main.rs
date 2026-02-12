@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
@@ -18,12 +18,15 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAX_LOG_LINES: usize = 2000;
+static PRINT_LOGS: OnceLock<bool> = OnceLock::new();
+static SCAN_PROCS: OnceLock<bool> = OnceLock::new();
 
 #[derive(Default)]
 struct ProcState {
     agent: Option<Child>,
     gateway: Option<Child>,
     logs: VecDeque<LogPayload>,
+    emit_logs: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -74,6 +77,14 @@ struct MemoryFileInfo {
 #[serde(rename_all = "camelCase")]
 struct MemoryFilePayload {
     name: String,
+    path: String,
+    content: String,
+    exists: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ConfigFilePayload {
     path: String,
     content: String,
     exists: bool,
@@ -164,21 +175,126 @@ fn read_config_workspace() -> Option<PathBuf> {
     Some(expand_tilde(workspace))
 }
 
-fn base_command() -> Command {
-    let mut cmd = Command::new("uv");
+fn resource_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path().resource_dir().ok()
+}
+
+fn embedded_python_root(app: &AppHandle) -> Option<PathBuf> {
+    let root = resource_dir(app)?;
+    let candidate = root.join("python");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn embedded_site_packages(app: &AppHandle) -> Option<PathBuf> {
+    let root = resource_dir(app)?;
+    let candidate = root.join("site-packages");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn embedded_python_exe(app: &AppHandle) -> Option<PathBuf> {
+    let root = embedded_python_root(app)?;
+    #[cfg(windows)]
+    {
+        let exe = root.join("python.exe");
+        if exe.exists() {
+            return Some(exe);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let exe = root.join("bin").join("python3");
+        if exe.exists() {
+            return Some(exe);
+        }
+        let exe = root.join("bin").join("python");
+        if exe.exists() {
+            return Some(exe);
+        }
+    }
+    None
+}
+
+fn local_venv_python() -> Option<PathBuf> {
+    let root = repo_root().join(".venv");
+    #[cfg(windows)]
+    {
+        let exe = root.join("Scripts").join("python.exe");
+        if exe.exists() {
+            return Some(exe);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let exe = root.join("bin").join("python3");
+        if exe.exists() {
+            return Some(exe);
+        }
+        let exe = root.join("bin").join("python");
+        if exe.exists() {
+            return Some(exe);
+        }
+    }
+    None
+}
+
+fn build_pythonpath(app: &AppHandle, use_embedded: bool) -> Option<String> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if use_embedded {
+        if let Some(site) = embedded_site_packages(app) {
+            paths.push(site);
+        }
+    } else {
+        paths.push(repo_root());
+    }
+    if let Some(existing) = std::env::var_os("PYTHONPATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    std::env::join_paths(paths).ok().and_then(|p| p.into_string().ok())
+}
+
+fn base_command(app: &AppHandle) -> Command {
+    let embedded_python = embedded_python_exe(app);
+    let venv_python = local_venv_python();
+    let use_embedded = embedded_python.is_some();
+    let python = embedded_python
+        .or(venv_python)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "python".to_string());
+    let mut cmd = Command::new(python);
     let root = repo_root();
     cmd.current_dir(&root);
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.env("PYTHONUNBUFFERED", "1");
-    cmd.env("LOGURU_LEVEL", "DEBUG");
+    if std::env::var_os("LOGURU_LEVEL").is_none() {
+        cmd.env("LOGURU_LEVEL", "INFO");
+    }
     cmd.env("LOGURU_ENQUEUE", "True");
     cmd.env("TERM", "dumb");
     cmd.env("COLUMNS", "120");
     cmd.env("NO_COLOR", "1");
     cmd.env("RICH_DISABLE", "1");
-    let python_path = root.to_string_lossy().to_string();
-    cmd.env("PYTHONPATH", python_path);
+    if use_embedded {
+        if let Some(pyhome) = embedded_python_root(app) {
+            cmd.env("PYTHONHOME", pyhome.to_string_lossy().to_string());
+        }
+        cmd.env("PYTHONNOUSERSITE", "1");
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    }
+    if let Some(python_path) = build_pythonpath(app, use_embedded) {
+        cmd.env("PYTHONPATH", python_path);
+    }
     if std::env::var_os("NANOBOT_HOME").is_none() {
         cmd.env("NANOBOT_HOME", nanobot_home().to_string_lossy().to_string());
     }
@@ -187,6 +303,47 @@ fn base_command() -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+fn emit_config_missing(app: &AppHandle) {
+    let path = config_path();
+    let payload = ConfigFilePayload {
+        path: path.to_string_lossy().to_string(),
+        content: String::new(),
+        exists: false,
+    };
+    let _ = app.emit("config-missing", payload);
+}
+
+fn run_onboard_inner(app: &AppHandle) -> Result<(), String> {
+    let path = config_path();
+    if path.exists() {
+        return Ok(());
+    }
+    emit_log(
+        app,
+        "gateway",
+        format!("Config not found at {}. Running onboard...", path.display()),
+        "stdout",
+    );
+    let mut cmd = base_command(app);
+    cmd.args(["-m", "nanobot", "onboard"]);
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            emit_log(app, "gateway", "Onboard completed".to_string(), "stdout");
+            Ok(())
+        }
+        Ok(status) => {
+            let msg = format!("Onboard failed (exit code {}).", status);
+            emit_log(app, "gateway", msg.clone(), "stderr");
+            Err(msg)
+        }
+        Err(err) => {
+            let msg = format!("Onboard failed: {err}");
+            emit_log(app, "gateway", msg.clone(), "stderr");
+            Err(msg)
+        }
+    }
 }
 
 fn workspace_root() -> PathBuf {
@@ -246,13 +403,20 @@ fn emit_log(app: &AppHandle, kind: &str, line: String, stream: &str) {
         line,
         stream: stream.to_string(),
     };
+    if *PRINT_LOGS.get_or_init(|| std::env::var_os("NANOBOT_TAURI_LOG_STDOUT").is_some()) {
+        println!("[{kind}][{stream}] {}", payload.line);
+    }
+    let mut should_emit = false;
     if let Ok(mut guard) = app.state::<Arc<Mutex<ProcState>>>().lock() {
         guard.logs.push_back(payload.clone());
         if guard.logs.len() > MAX_LOG_LINES {
             guard.logs.pop_front();
         }
+        should_emit = guard.emit_logs;
     }
-    let _ = app.emit("process-log", payload);
+    if should_emit {
+        let _ = app.emit("process-log", payload);
+    }
 }
 
 fn spawn_reader(
@@ -351,7 +515,10 @@ fn kill_matching_processes(kind: &str) {
             r#"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -match '{}' }} | Stop-Process -Id {{$_.ProcessId}} -Force"#,
             pattern
         );
-        let _ = Command::new("powershell").args(["-Command", &cmd]).status();
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &cmd]);
+        ps.creation_flags(CREATE_NO_WINDOW);
+        let _ = ps.status();
     }
     #[cfg(not(windows))]
     {
@@ -362,6 +529,36 @@ fn kill_matching_processes(kind: &str) {
         };
         // pkill -f matches full command line; best-effort cleanup.
         let _ = Command::new("pkill").args(["-f", pattern]).status();
+    }
+}
+
+fn is_matching_process_running(kind: &str) -> bool {
+    let pattern = match kind {
+        "agent" => "nanobot agent",
+        "gateway" => "nanobot gateway",
+        _ => return false,
+    };
+    #[cfg(windows)]
+    {
+        let cmd = format!(
+            "if (Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -match '{}' }} | Select-Object -First 1) {{ exit 0 }} else {{ exit 1 }}",
+            pattern
+        );
+        let mut ps = Command::new("powershell");
+        ps.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &cmd]);
+        ps.creation_flags(CREATE_NO_WINDOW);
+        return ps
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        return Command::new("pgrep")
+            .args(["-f", pattern])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
     }
 }
 
@@ -404,8 +601,8 @@ fn start_process_inner(
 
     match kind {
         "agent" => {
-            let mut cmd = base_command();
-            cmd.args(["run", "python", "-u", "-m", "nanobot", "agent"])
+            let mut cmd = base_command(app);
+            cmd.args(["-u", "-m", "nanobot", "agent", "--daemon"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::piped());
@@ -443,19 +640,14 @@ fn start_process_inner(
             emit_log(app, "agent", "Agent started".to_string(), "stdout");
         }
         "gateway" => {
-            let mut cmd = base_command();
-            cmd.args([
-                "run",
-                "python",
-                "-u",
-                "-m",
-                "nanobot",
-                "gateway",
-                "--verbose",
-            ])
+            let mut cmd = base_command(app);
+            cmd.args(["-u", "-m", "nanobot", "gateway"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
+            if std::env::var_os("NANOBOT_GATEWAY_VERBOSE").is_some() {
+                cmd.arg("--verbose");
+            }
             let mut child = cmd.spawn().map_err(|e| {
                 emit_log(
                     app,
@@ -497,8 +689,24 @@ fn start_process_inner(
 #[tauri::command]
 fn get_status(state: State<Arc<Mutex<ProcState>>>) -> StatusPayload {
     let mut guard = state.lock().expect("state");
-    let agent = refresh_child(&mut guard.agent);
-    let gateway = refresh_child(&mut guard.gateway);
+    let agent_managed = refresh_child(&mut guard.agent);
+    let gateway_managed = refresh_child(&mut guard.gateway);
+    let scan = *SCAN_PROCS
+        .get_or_init(|| std::env::var_os("NANOBOT_SCAN_PROCS").is_some());
+    let agent = if agent_managed {
+        true
+    } else if scan {
+        is_matching_process_running("agent")
+    } else {
+        false
+    };
+    let gateway = if gateway_managed {
+        true
+    } else if scan {
+        is_matching_process_running("gateway")
+    } else {
+        false
+    };
     StatusPayload { agent, gateway }
 }
 
@@ -506,6 +714,13 @@ fn get_status(state: State<Arc<Mutex<ProcState>>>) -> StatusPayload {
 fn get_logs(state: State<Arc<Mutex<ProcState>>>) -> Vec<LogPayload> {
     let guard = state.lock().expect("state");
     guard.logs.iter().cloned().collect()
+}
+
+#[tauri::command]
+fn set_log_streaming(enabled: bool, state: State<Arc<Mutex<ProcState>>>) {
+    if let Ok(mut guard) = state.lock() {
+        guard.emit_logs = enabled;
+    }
 }
 
 #[tauri::command]
@@ -643,6 +858,22 @@ fn read_memory_file(name: String) -> Result<MemoryFilePayload, String> {
 }
 
 #[tauri::command]
+fn read_config_file() -> Result<ConfigFilePayload, String> {
+    let path = config_path();
+    let exists = path.exists();
+    let content = if exists {
+        std::fs::read_to_string(&path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+    Ok(ConfigFilePayload {
+        path: path.to_string_lossy().to_string(),
+        content,
+        exists,
+    })
+}
+
+#[tauri::command]
 fn read_cron_jobs() -> Result<Value, String> {
     let path = nanobot_home().join("cron").join("jobs.json");
     let contents = match std::fs::read_to_string(&path) {
@@ -656,6 +887,32 @@ fn read_cron_jobs() -> Result<Value, String> {
         "version": version,
         "jobs": jobs
     }))
+}
+
+#[tauri::command]
+fn delete_cron_job(job_id: String) -> Result<bool, String> {
+    let path = nanobot_home().join("cron").join("jobs.json");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
+    let mut data: Value = serde_json::from_str(&contents)
+        .unwrap_or_else(|_| json!({"version": 1, "jobs": []}));
+    let jobs = data
+        .get_mut("jobs")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "invalid cron store".to_string())?;
+    let before = jobs.len();
+    jobs.retain(|job| job.get("id").and_then(Value::as_str) != Some(job_id.as_str()));
+    let removed = jobs.len() < before;
+    if removed {
+        if data.get("version").is_none() {
+            data["version"] = json!(1);
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -836,6 +1093,26 @@ fn save_memory_file(name: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn save_config_file(content: String) -> Result<(), String> {
+    let parsed: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Invalid JSON: {e}"))?;
+    if !parsed.is_object() {
+        return Err("Config must be a JSON object.".to_string());
+    }
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn run_onboard(app: AppHandle) -> Result<(), String> {
+    run_onboard_inner(&app)
+}
+
+#[tauri::command]
 fn delete_memory_file(name: String) -> Result<(), String> {
     validate_memory_name(&name)?;
     if name == "MEMORY.md" {
@@ -895,11 +1172,10 @@ async fn send_agent_message(
         format!("User: {}", truncate_line(&message, 200)),
         "stdout",
     );
+    let app_handle = app.clone();
     let combined = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut cmd = base_command();
+        let mut cmd = base_command(&app_handle);
         cmd.args([
-            "run",
-            "python",
             "-m",
             "nanobot",
             "agent",
@@ -1019,8 +1295,21 @@ fn main() {
 
             let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
             let handle = app.handle().clone();
-            let _ = start_process_inner("agent", &state, &handle);
-            let _ = start_process_inner("gateway", &state, &handle);
+            if config_path().exists() {
+                let _ = start_process_inner("agent", &state, &handle);
+                let _ = start_process_inner("gateway", &state, &handle);
+            } else {
+                emit_log(
+                    &handle,
+                    "gateway",
+                    format!(
+                        "Config not found at {}. Waiting for setup...",
+                        config_path().display()
+                    ),
+                    "stderr",
+                );
+                emit_config_missing(&handle);
+            }
 
             Ok(())
         })
@@ -1033,6 +1322,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_logs,
+            set_log_streaming,
             list_workspace_skills,
             read_skill_file,
             save_skill_file,
@@ -1041,12 +1331,16 @@ fn main() {
             read_memory_file,
             save_memory_file,
             delete_memory_file,
+            read_config_file,
+            save_config_file,
+            run_onboard,
             read_session_history,
             list_sessions,
             read_session_messages,
             delete_session_line,
             delete_session_lines,
             read_cron_jobs,
+            delete_cron_job,
             start_process,
             stop_process,
             send_agent_message

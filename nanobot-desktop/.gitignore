@@ -1,0 +1,7 @@
+﻿node_modules
+/dist
+/src-tauri/target
+/src-tauri/tauri.conf.json.bak
+/resources
+/src-tauri/resources
+/.tmp_runtime
