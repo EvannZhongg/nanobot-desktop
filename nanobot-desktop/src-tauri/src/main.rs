@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -116,6 +116,20 @@ fn repo_root() -> PathBuf {
         .join("..")
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", rest));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -175,36 +189,57 @@ fn read_config_workspace() -> Option<PathBuf> {
     Some(expand_tilde(workspace))
 }
 
-fn resource_dir(app: &AppHandle) -> Option<PathBuf> {
-    app
-        .path()
-        .resource_dir()
-        .ok()
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(|dir| dir.join("resources")))
-        })
+fn resource_root_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut push = |path: PathBuf| {
+        let normalized = normalize_path(&path);
+        if normalized.exists() && seen.insert(normalized.clone()) {
+            out.push(normalized);
+        }
+    };
+
+    if let Ok(path) = app.path().resource_dir() {
+        push(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let dir = dir.to_path_buf();
+            push(dir.clone());
+            push(dir.join("resources"));
+            push(dir.join("resources").join("_up_"));
+            push(dir.join("_up_"));
+        }
+    }
+
+    let dev_resources = repo_root()
+        .join("nanobot-desktop")
+        .join("src-tauri")
+        .join("resources");
+    push(dev_resources);
+    out
+}
+
+fn find_resource_subdir(app: &AppHandle, name: &str) -> Option<PathBuf> {
+    for root in resource_root_candidates(app) {
+        let direct = root.join(name);
+        if direct.exists() {
+            return Some(direct);
+        }
+        let nested = root.join("resources").join(name);
+        if nested.exists() {
+            return Some(nested);
+        }
+    }
+    None
 }
 
 fn embedded_python_root(app: &AppHandle) -> Option<PathBuf> {
-    let root = resource_dir(app)?;
-    let candidate = root.join("python");
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
+    find_resource_subdir(app, "python")
 }
 
 fn embedded_site_packages(app: &AppHandle) -> Option<PathBuf> {
-    let root = resource_dir(app)?;
-    let candidate = root.join("site-packages");
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
+    find_resource_subdir(app, "site-packages")
 }
 
 fn embedded_python_exe(app: &AppHandle) -> Option<PathBuf> {
@@ -212,6 +247,10 @@ fn embedded_python_exe(app: &AppHandle) -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let exe = root.join("python.exe");
+        if exe.exists() {
+            return Some(exe);
+        }
+        let exe = root.join("Scripts").join("python.exe");
         if exe.exists() {
             return Some(exe);
         }
@@ -255,12 +294,14 @@ fn local_venv_python() -> Option<PathBuf> {
 
 fn build_pythonpath(app: &AppHandle, use_embedded: bool) -> Option<String> {
     let mut paths: Vec<PathBuf> = Vec::new();
-    if use_embedded {
-        if let Some(site) = embedded_site_packages(app) {
-            paths.push(site);
+    if let Some(site) = embedded_site_packages(app) {
+        paths.push(normalize_path(&site));
+    }
+    if !use_embedded {
+        let root = repo_root();
+        if root.exists() {
+            paths.push(normalize_path(&root));
         }
-    } else {
-        paths.push(repo_root());
     }
     if let Some(existing) = std::env::var_os("PYTHONPATH") {
         paths.extend(std::env::split_paths(&existing));
@@ -279,9 +320,26 @@ fn base_command(app: &AppHandle) -> Command {
         .or(venv_python)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "python".to_string());
+    let python_path = build_pythonpath(app, use_embedded);
+    if *PRINT_LOGS.get_or_init(|| std::env::var_os("NANOBOT_TAURI_LOG_STDOUT").is_some()) {
+        println!("[nanobot-desktop] python={python}");
+        if let Some(root) = embedded_python_root(app) {
+            println!("[nanobot-desktop] embedded_python_root={}", root.display());
+        }
+        if let Some(site) = embedded_site_packages(app) {
+            println!("[nanobot-desktop] embedded_site_packages={}", site.display());
+        }
+        if let Some(path) = python_path.as_ref() {
+            println!("[nanobot-desktop] PYTHONPATH={path}");
+        }
+    }
     let mut cmd = Command::new(python);
     let root = repo_root();
-    cmd.current_dir(&root);
+    if root.exists() {
+        cmd.current_dir(&root);
+    } else if let Some(home) = home_dir() {
+        cmd.current_dir(&home);
+    }
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
     cmd.env("PYTHONUNBUFFERED", "1");
@@ -295,12 +353,13 @@ fn base_command(app: &AppHandle) -> Command {
     cmd.env("RICH_DISABLE", "1");
     if use_embedded {
         if let Some(pyhome) = embedded_python_root(app) {
-            cmd.env("PYTHONHOME", pyhome.to_string_lossy().to_string());
+            let normalized = normalize_path(&pyhome);
+            cmd.env("PYTHONHOME", normalized.to_string_lossy().to_string());
         }
         cmd.env("PYTHONNOUSERSITE", "1");
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     }
-    if let Some(python_path) = build_pythonpath(app, use_embedded) {
+    if let Some(python_path) = python_path {
         cmd.env("PYTHONPATH", python_path);
     }
     if std::env::var_os("NANOBOT_HOME").is_none() {
