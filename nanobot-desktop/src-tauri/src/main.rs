@@ -176,7 +176,15 @@ fn read_config_workspace() -> Option<PathBuf> {
 }
 
 fn resource_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().resource_dir().ok()
+    app
+        .path()
+        .resource_dir()
+        .ok()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("resources")))
+        })
 }
 
 fn embedded_python_root(app: &AppHandle) -> Option<PathBuf> {
