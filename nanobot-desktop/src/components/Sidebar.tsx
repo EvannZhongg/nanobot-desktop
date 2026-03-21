@@ -1,12 +1,9 @@
-/**
- * Sidebar navigation component.
- * Displays brand, tab navigation buttons, and status footer.
- */
 import React, { memo } from "react";
 import { 
-  MessageSquare, Monitor, Calendar, History, 
-  Zap, Brain, Cpu, Settings, Plus, Activity, 
-  Settings2 
+  Home, Monitor, Clock, MessageSquare, 
+  Settings, Layers, Terminal, Database, 
+  Cpu, Plus, Router, Users, Calendar, 
+  History, Zap, Brain, Activity, Settings2 
 } from "lucide-react";
 import type { TabKey, Status } from "../types";
 import { useSettings } from "../hooks/useSettings";
@@ -36,7 +33,7 @@ export default memo(function Sidebar({ tab, setTab, status, currentSession, onNe
     <aside className="sidebar">
       <div className="sidebar-brand-container">
         <div className="brand">
-          <span className="logo">🤖</span>
+          <Brain size={24} className="icon-purple" />
           <span>Nanobot</span>
         </div>
         <button 
@@ -74,12 +71,22 @@ export default memo(function Sidebar({ tab, setTab, status, currentSession, onNe
           <div className="status-row">
             <Activity size={14} className={status.agent ? "text-success" : "text-muted"} />
             <span className="status-label">Agent</span>
-            <span className={`status-dot ${status.agent ? "on" : "off"}`} />
+            <span className={`status-dot agent ${status.agent ? "on" : "off"}`} />
           </div>
           <div className="status-row">
             <Settings2 size={14} className={status.gateway ? "text-accent" : "text-muted"} />
             <span className="status-label">Gateway</span>
-            <span className={`status-dot ${status.gateway ? "on" : "off"}`} />
+            <span className={`status-dot gateway ${status.gateway ? "on" : "off"}`} />
+          </div>
+          <div className="status-row">
+            <Router size={14} className={status.router ? "text-info" : "text-muted"} />
+            <span className="status-label">Router</span>
+            <span className={`status-dot router ${status.router ? "on" : "off"}`} />
+          </div>
+          <div className="status-row">
+            <Users size={14} className={status.subagents ? "text-warning" : "text-muted"} />
+            <span className="status-label">Subagents</span>
+            <span className={`status-dot subagents ${status.subagents ? "on" : "off"}`} />
           </div>
         </div>
 

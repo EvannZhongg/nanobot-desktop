@@ -3,6 +3,7 @@
  * All session-viewer state lives here.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { History } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Message, SessionInfo, SessionMessagePayload } from "../types";
 import { HISTORY_BATCH } from "../utils/helpers";
@@ -159,8 +160,11 @@ export default function SessionsPanel({ sessions, loadSessions, sessionsLoading,
           {error && <div className="skills-error">{error}</div>}
           {sessions.length === 0 && !sessionsLoading && (
             <div className="empty-state">
-              <div className="empty-state-icon">📋</div>
+              <div className="empty-state-icon">
+                <History size={32} />
+              </div>
               <div className="empty-state-text">No sessions found</div>
+              <div className="empty-state-hint">Your chat history and saved sessions will appear here.</div>
             </div>
           )}
           {sessions.map((s) => (

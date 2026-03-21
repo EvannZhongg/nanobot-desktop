@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Client;
+use tauri::AppHandle;
+use crate::emit_log;
 
 use sha2::{Sha256, Digest};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -45,7 +48,8 @@ fn random_string() -> String {
 }
 
 #[tauri::command]
-pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, String> {
+pub async fn start_browser_oauth(app: AppHandle, provider: String) -> Result<OAuthTokenPayload, String> {
+    emit_log(&app, "gateway", format!("Starting browser OAuth for provider: {}", provider), "stdout");
     if provider != "openai" {
         return Err(format!("Unsupported browser OAuth provider: {}", provider));
     }
@@ -74,13 +78,15 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
         
     let auth_url = url.to_string();
     
-    // Start local server
-    let server = tiny_http::Server::http("127.0.0.1:1455")
-        .map_err(|e| format!("Failed to start local server: {}", e))?;
+    // Start local server; handle port conflict gracefully.
+    let server_addr = "127.0.0.1:1455";
+    let server = tiny_http::Server::http(server_addr)
+        .map_err(|e| format!("Failed to start callback server on {}: {}. Is another instance running?", server_addr, e))?;
         
     // Open browser
+    emit_log(&app, "gateway", format!("Opening browser with URL: {}", auth_url), "stdout");
     if let Err(e) = open::that(&auth_url) {
-        return Err(format!("Failed to open browser: {}", e));
+        return Err(format!("Could not open browser: {}. Please go to this URL manually: {}", e, auth_url));
     }
     
     let mut obtained_code = None;
@@ -90,6 +96,7 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
     for _ in 0..600 {
         if let Ok(Some(request)) = server.recv_timeout(std::time::Duration::from_millis(500)) {
             let req_url = request.url().to_string();
+            // Match exactly or with trailing slash
             if req_url.starts_with("/auth/callback") {
                 if let Ok(parsed) = url::Url::parse(&format!("http://localhost{}", req_url)) {
                     let mut code = None;
@@ -102,7 +109,7 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
                         obtained_code = Some(c);
                         obtained_state = st;
                         let response = tiny_http::Response::from_string(
-                            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Auth successful</title></head><body><p>Authentication successful. You can safely close this tab and return to the application.</p><script>window.close();</script></body></html>"
+                            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Auth Success</title><style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc;} .card{background:white;padding:32px;border-radius:12px;box-shadow:0 4px 6px -1px rgb(0 0 0 / 0.1);text-align:center;max-width:400px;}</style></head><body><div class='card'><h2>Success</h2><p>Authentication complete. You can close this window now.</p><script>window.close();</script></div></body></html>"
                         ).with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap());
                         let _ = request.respond(response);
                         break;
@@ -113,10 +120,10 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
         }
     }
     
-    let code = obtained_code.ok_or_else(|| "OAuth callback timed out or failed to receive code".to_string())?;
+    let code = obtained_code.ok_or_else(|| "OAuth callback timed out. Please try again.".to_string())?;
     
     if obtained_state.unwrap_or_default() != state {
-        return Err("OAuth state mismatch".to_string());
+        return Err("Security error: OAuth state mismatch. Possible forgery attempt.".to_string());
     }
     
     // Exchange token
@@ -133,11 +140,11 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("Token request failed: {}", e))?;
+        .map_err(|e| format!("Network error during token exchange: {}", e))?;
         
     if !res.status().is_success() {
         let text = res.text().await.unwrap_or_default();
-        return Err(format!("OpenAI token exchange failed: {}", text));
+        return Err(format!("OpenAI returned an error: {}", text));
     }
     
     #[derive(Deserialize)]
@@ -147,14 +154,13 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
         expires_in: u64,
     }
     
-    let token_res: TokenResponse = res.json().await.map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let token_res: TokenResponse = res.json().await.map_err(|e| format!("Invalid JSON from provider: {}", e))?;
     
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64 + (token_res.expires_in * 1000);
         
-    // For OpenAI we would extract account ID from JWT, but we can just use "openai" for simplicity here since it's desktop config.
     Ok(OAuthTokenPayload {
         access: token_res.access_token,
         refresh: token_res.refresh_token,
@@ -164,13 +170,13 @@ pub async fn start_browser_oauth(provider: String) -> Result<OAuthTokenPayload, 
 }
 
 #[tauri::command]
-pub async fn start_device_oauth(provider: String, _region: Option<String>) -> Result<DeviceOAuthInitPayload, String> {
+pub async fn start_device_oauth(app: AppHandle, provider: String, _region: Option<String>) -> Result<DeviceOAuthInitPayload, String> {
+    emit_log(&app, "gateway", format!("Starting device OAuth for provider: {}", provider), "stdout");
     let client = Client::new();
     let verifier = random_string();
     let challenge = pkce_challenge(&verifier);
     
     if provider == "minimax" {
-        // We will default to global api.minimax.io unless cn region
         let base_url = if _region.as_deref() == Some("cn") { "https://api.minimaxi.com" } else { "https://api.minimax.io" };
         let client_id = "78257093-7e40-4613-99e0-527b14b39113";
         let state = random_string();
@@ -189,7 +195,7 @@ pub async fn start_device_oauth(provider: String, _region: Option<String>) -> Re
             .form(&params)
             .send()
             .await
-            .map_err(|e| format!("Failed to request Device Code: {}", e))?;
+            .map_err(|e| format!("Failed to connect to MiniMax: {}", e))?;
             
         if !res.status().is_success() {
             let text = res.text().await.unwrap_or_default();
@@ -204,10 +210,10 @@ pub async fn start_device_oauth(provider: String, _region: Option<String>) -> Re
             interval: Option<u64>,
         }
         
-        let parsed: MiniMaxDeviceAuth = res.json().await.map_err(|e| format!("Failed to parse struct: {}", e))?;
+        let parsed: MiniMaxDeviceAuth = res.json().await.map_err(|e| format!("Failed to parse MiniMax response: {}", e))?;
         
         Ok(DeviceOAuthInitPayload {
-            device_code: parsed.user_code.clone(), // MiniMax uses user_code for polling
+            device_code: parsed.user_code.clone(),
             user_code: parsed.user_code,
             verification_uri: parsed.verification_uri,
             expires_in: parsed.expired_in,
@@ -230,7 +236,7 @@ pub async fn start_device_oauth(provider: String, _region: Option<String>) -> Re
             .form(&params)
             .send()
             .await
-            .map_err(|e| format!("Failed to request Device Code: {}", e))?;
+            .map_err(|e| format!("Failed to connect to Qwen: {}", e))?;
             
         if !res.status().is_success() {
             let text = res.text().await.unwrap_or_default();
@@ -247,7 +253,7 @@ pub async fn start_device_oauth(provider: String, _region: Option<String>) -> Re
             interval: Option<u64>,
         }
         
-        let parsed: QwenDeviceAuth = res.json().await.map_err(|e| format!("Failed to parse struct: {}", e))?;
+        let parsed: QwenDeviceAuth = res.json().await.map_err(|e| format!("Failed to parse Qwen response: {}", e))?;
         
         Ok(DeviceOAuthInitPayload {
             device_code: parsed.device_code,
@@ -263,7 +269,8 @@ pub async fn start_device_oauth(provider: String, _region: Option<String>) -> Re
 }
 
 #[tauri::command]
-pub async fn poll_device_oauth(provider: String, device_code: String, verifier: String, _region: Option<String>) -> Result<DeviceTokenResult, String> {
+pub async fn poll_device_oauth(app: AppHandle, provider: String, device_code: String, verifier: String, _region: Option<String>) -> Result<DeviceTokenResult, String> {
+    // We don't log every poll to avoid spam, but we can log the first one or slow downs.
     let client = Client::new();
     
     if provider == "minimax" {
@@ -281,32 +288,42 @@ pub async fn poll_device_oauth(provider: String, device_code: String, verifier: 
             .form(&params)
             .send()
             .await
-            .map_err(|e| format!("Failed: {}", e))?;
+            .map_err(|e| format!("Polling network error: {}", e))?;
             
         let text = res.text().await.unwrap_or_default();
-        if text.contains("\"status\":\"error\"") || text.contains("\"status\": \"error\"") {
-            return Ok(DeviceTokenResult::Error { message: "An error occurred".to_string() });
-        }
-        if !text.contains("\"status\":\"success\"") && !text.contains("\"status\": \"success\"") {
-            return Ok(DeviceTokenResult::Pending { slow_down: false });
-        }
         
         #[derive(Deserialize)]
-        struct MinimaxToken {
-            access_token: String,
-            refresh_token: String,
-            expired_in: u64,
+        struct MiniMaxGenericResponse {
+            status: Option<String>,
+            message: Option<String>,
+            access_token: Option<String>,
+            refresh_token: Option<String>,
+            expired_in: Option<u64>,
+            error: Option<Value>,
         }
-        let token_res: MinimaxToken = serde_json::from_str(&text).map_err(|e| format!("Parse error: {}", e))?;
         
-        Ok(DeviceTokenResult::Success {
-            token: OAuthTokenPayload {
-                access: token_res.access_token,
-                refresh: token_res.refresh_token,
-                expires: token_res.expired_in,
-                account_id: Some("minimax".to_string()),
+        let parsed: MiniMaxGenericResponse = serde_json::from_str(&text).map_err(|e| format!("MiniMax Parse Error: {} - Data: {}", e, text))?;
+        
+        if let Some(status) = parsed.status {
+            if status == "error" {
+                return Ok(DeviceTokenResult::Error { message: parsed.message.unwrap_or_else(|| "MiniMax unknown error".to_string()) });
             }
-        })
+            if status == "success" {
+                return Ok(DeviceTokenResult::Success {
+                    token: OAuthTokenPayload {
+                        access: parsed.access_token.unwrap_or_default(),
+                        refresh: parsed.refresh_token.unwrap_or_default(),
+                        expires: parsed.expired_in.unwrap_or(3600),
+                        account_id: Some("minimax".to_string()),
+                    }
+                });
+            }
+        }
+        
+        // If slow down or authorization_pending
+        let slow_down = text.contains("slow_down");
+        Ok(DeviceTokenResult::Pending { slow_down })
+
     } else if provider == "qwen" {
         let client_id = "f0304373b74a44d2b584a3fb70ca9e56";
         
@@ -321,43 +338,49 @@ pub async fn poll_device_oauth(provider: String, device_code: String, verifier: 
             .form(&params)
             .send()
             .await
-            .map_err(|e| format!("Failed: {}", e))?;
+            .map_err(|e| format!("Polling network error: {}", e))?;
             
         let text = res.text().await.unwrap_or_default();
         
-        if text.contains("\"authorization_pending\"") {
-            return Ok(DeviceTokenResult::Pending { slow_down: false });
-        }
-        if text.contains("\"slow_down\"") {
-            return Ok(DeviceTokenResult::Pending { slow_down: true });
-        }
-        if text.contains("\"error\"") {
-            return Ok(DeviceTokenResult::Error { message: text });
-        }
-        
         #[derive(Deserialize)]
-        struct QwenToken {
-            access_token: String,
-            refresh_token: String,
-            expires_in: u64,
+        struct QwenGenericResponse {
+            error: Option<String>,
+            access_token: Option<String>,
+            refresh_token: Option<String>,
+            expires_in: Option<u64>,
         }
         
-        let token_res: QwenToken = serde_json::from_str(&text).map_err(|e| format!("Parse error: {}", e))?;
+        let parsed: QwenGenericResponse = serde_json::from_str(&text).map_err(|e| format!("Qwen Parse Error: {} - Data: {}", e, text))?;
         
-        let expires = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64 + (token_res.expires_in * 1000);
-            
-        Ok(DeviceTokenResult::Success {
-            token: OAuthTokenPayload {
-                access: token_res.access_token,
-                refresh: token_res.refresh_token,
-                expires,
-                account_id: Some("qwen".to_string()),
+        if let Some(err) = parsed.error {
+            if err == "authorization_pending" {
+                return Ok(DeviceTokenResult::Pending { slow_down: false });
             }
-        })
+            if err == "slow_down" {
+                return Ok(DeviceTokenResult::Pending { slow_down: true });
+            }
+            return Ok(DeviceTokenResult::Error { message: err });
+        }
+        
+        if let Some(access_token) = parsed.access_token {
+            let expires = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64 + (parsed.expires_in.unwrap_or(3600) * 1000);
+                
+            return Ok(DeviceTokenResult::Success {
+                token: OAuthTokenPayload {
+                    access: access_token,
+                    refresh: parsed.refresh_token.unwrap_or_default(),
+                    expires,
+                    account_id: Some("qwen".to_string()),
+                }
+            });
+        }
+        
+        Ok(DeviceTokenResult::Pending { slow_down: false })
     } else {
         Err(format!("Unsupported device OAuth provider: {}", provider))
     }
 }
+

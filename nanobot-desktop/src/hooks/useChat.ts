@@ -46,22 +46,40 @@ export function useChat(sessions: SessionInfo[]) {
     localStorage.setItem("nanobot-chat-font-size", String(chatFontSize));
   }, [chatFontSize]);
 
-  // Listen for agent status events
+  // Sync with Rust-side persistent registry on mount
+
+  // Sync with Rust-side persistent registry on mount
+  useEffect(() => {
+    invoke<Record<string, AgentStatusEvent>>("get_subagent_registry")
+      .then((registry) => {
+        if (registry && Object.keys(registry).length > 0) {
+          setSubagentStatuses(registry);
+        }
+      })
+      .catch((err) => console.error("Failed to fetch subagent registry", err));
+  }, []);
+
   useEffect(() => {
     const unlisten = (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      return await listen<AgentStatusEvent>("agent-status", (event) => {
-        const payload = event.payload;
-        console.log("Agent Status Event:", payload);
-        setSubagentStatuses((prev) => ({
-          ...prev,
-          [payload.agent_id]: payload
-        }));
+      return listen<AgentStatusEvent>("agent-status", (event) => {
+        setSubagentStatuses((prev) => {
+          const payload = event.payload;
+          const existing = prev[payload.agent_id];
+          
+          // If it's a tool_call, we might want to preserve history 
+          // if the event itself doesn't contain it (Rust backend sends history too now)
+          return {
+            ...prev,
+            [payload.agent_id]: {
+              ...existing,
+              ...payload
+            },
+          };
+        });
       });
     })();
-    return () => {
-      unlisten.then(u => u());
-    };
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   const modelList = useMemo(() => {
@@ -158,7 +176,10 @@ export function useChat(sessions: SessionInfo[]) {
   };
 
   const addAttachment = useCallback((attachment: Attachment) => {
-    setAttachments((prev) => [...prev, attachment]);
+    setAttachments((prev) => {
+      if (prev.some(a => a.path === attachment.path)) return prev;
+      return [...prev, attachment];
+    });
   }, []);
 
   const removeAttachment = useCallback((id: string) => {
@@ -224,43 +245,75 @@ export function useChat(sessions: SessionInfo[]) {
   const switchSession = useCallback((name: string) => {
     setCurrentSession(name);
     setMessages([]);
+    setAttachments([]); // Round 8: Clear state on switch
     setHistoryOffset(0);
     setHistoryEnd(false);
   }, []);
 
+  const triggerLock = useRef(false);
+
   const handleInputChange = useCallback(async (newText: string) => {
+    // Basic text update
+    setInput(newText);
+    
+    // Check for trigger patterns
+    if (triggerLock.current) return;
+    
     const match = newText.match(/(^|\s)([!@])$/);
-    if (!match) {
-      setInput(newText);
-      return;
-    }
+    if (!match) return;
     
     const trigger = match[2];
     const isDir = trigger === "!";
     
-    const selected = await open({
-      directory: isDir,
-      defaultPath: isDir ? undefined : (lastSelectedFolder ?? undefined)
-    });
-    
-    if (selected && typeof selected === "string") {
-      if (isDir) setLastSelectedFolder(selected);
-      // Replace the trigger character with the selected path
-      setInput(newText.slice(0, -1) + selected + " ");
-    } else {
-      // If cancelled, just apply the text so they can keep typing, 
-      // but without the trigger so it doesn't re-open immediately
-      setInput(newText.slice(0, -1));
+    triggerLock.current = true;
+    try {
+      const selected = await open({
+        directory: isDir,
+        defaultPath: isDir ? undefined : (lastSelectedFolder ?? undefined)
+      });
+      
+      if (selected && typeof selected === "string") {
+        if (isDir) setLastSelectedFolder(selected);
+        setInput(prev => {
+          // Robust replacement: find the trigger character at the end of where it was
+          // and replace it with the selected path.
+          if (prev.endsWith(trigger)) {
+            return prev.slice(0, -1) + selected + " ";
+          }
+          return prev;
+        });
+      }
+    } catch (err) {
+      console.error("Trigger fail", err);
+    } finally {
+      // Small cooldown to prevent immediate re-trigger if UI events double-fire
+      setTimeout(() => { triggerLock.current = false; }, 300);
     }
   }, [lastSelectedFolder]);
 
   const cancelSubagent = useCallback(async (agentId: string) => {
     try {
       await invoke("cancel_subagent", { agentId });
-      // We don't need to manually update state here, 
-      // the backend will emit a "cancelled" or "completed" status event.
     } catch (err) {
       console.error("Failed to cancel subagent", err);
+    }
+  }, []);
+
+  const stopGeneration = useCallback(async () => {
+    setSending(false); // Immediate UI feedback
+    try {
+      await invoke("stop_generation");
+    } catch (err) {
+      console.error("Failed to stop generation", err);
+    }
+  }, []);
+
+  const reloadSubagents = useCallback(async () => {
+    try {
+      const registry = await invoke<Record<string, AgentStatusEvent>>("get_subagent_registry");
+      setSubagentStatuses(registry || {});
+    } catch (err) {
+      console.error("Failed to reload subagent registry", err);
     }
   }, []);
 
@@ -278,6 +331,7 @@ export function useChat(sessions: SessionInfo[]) {
     loadHistoryChunk,    handleHistoryScroll,
     sendMessage, handleInputKeyDown,
     attachments, addAttachment, removeAttachment,
-    subagentStatuses, cancelSubagent,
+    subagentStatuses, cancelSubagent, stopGeneration,
+    reloadSubagents,
   };
 }

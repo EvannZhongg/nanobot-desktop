@@ -1,31 +1,31 @@
 import React from "react";
-import { Attachment } from "../types";
-import { FileText, Image as ImageIcon, X } from "lucide-react";
+import { X, FileText, Image as ImageIcon } from "lucide-react";
+import type { Attachment } from "../types";
 
-interface AttachmentBarProps {
+type Props = {
   attachments: Attachment[];
   onRemove: (id: string) => void;
-}
+};
 
-export default function AttachmentBar({ attachments, onRemove }: AttachmentBarProps) {
+export const AttachmentBar: React.FC<Props> = ({ attachments, onRemove }) => {
   if (attachments.length === 0) return null;
 
   return (
     <div className="attachments-bar">
-      {attachments.map((file) => (
-        <div key={file.id} className="attachment-pill">
-          {file.previewUrl ? (
-            <img src={file.previewUrl} alt={file.name} className="attachment-preview" />
+      {attachments.map((at) => (
+        <div key={at.id} className="attachment-pill">
+          {at.previewUrl ? (
+            <img src={at.previewUrl} alt={at.name} className="attachment-preview" />
           ) : (
             <div className="attachment-icon">
-              <FileText size={16} />
+              {at.type.includes("image") ? <ImageIcon size={14} /> : <FileText size={14} />}
             </div>
           )}
-          <span className="attachment-name">{file.name}</span>
-          <button
-            className="attachment-remove"
-            onClick={() => onRemove(file.id)}
-            aria-label={`Remove ${file.name}`}
+          <span className="attachment-name">{at.name}</span>
+          <button 
+            className="attachment-remove" 
+            onClick={() => onRemove(at.id)}
+            aria-label="Remove attachment"
           >
             <X size={14} />
           </button>
@@ -33,4 +33,6 @@ export default function AttachmentBar({ attachments, onRemove }: AttachmentBarPr
       ))}
     </div>
   );
-}
+};
+
+export default AttachmentBar;

@@ -3,6 +3,7 @@
  * All skills-specific state lives here.
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Zap, FileEdit } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SkillItem, SkillFile } from "../types";
 
@@ -125,8 +126,11 @@ export default function SkillsPanel({ toast }: Props) {
         <div className="skills-list">
           {skills.length === 0 && !loading && (
             <div className="empty-state">
-              <div className="empty-state-icon">🧩</div>
-              <div className="empty-state-text">No skills found in workspace/skills</div>
+              <div className="empty-state-icon">
+                <Zap size={32} />
+              </div>
+              <div className="empty-state-text">No skills found</div>
+              <div className="empty-state-hint">Create skills in your workspace/skills directory to automate tasks.</div>
             </div>
           )}
           {filteredSkills.map((skill) => (
@@ -179,8 +183,11 @@ export default function SkillsPanel({ toast }: Props) {
             </>
           ) : (
             <div className="empty-state">
-              <div className="empty-state-icon">📝</div>
+              <div className="empty-state-icon">
+                <FileEdit size={32} />
+              </div>
               <div className="empty-state-text">Select a skill to edit</div>
+              <div className="empty-state-hint">Choose a skill from the list to modify its implementation.</div>
             </div>
           )}
         </div>

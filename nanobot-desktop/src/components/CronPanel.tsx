@@ -3,6 +3,7 @@
  * All cron-specific state lives here, not in App.
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { Clock } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import type { CronData, CronJob } from "../types";
 import {
@@ -90,8 +91,11 @@ export default function CronPanel({ toast, proc }: Props) {
           <div className="skills-error">{error}</div>
         ) : cronData.jobs.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-state-icon">⏰</div>
+            <div className="empty-state-icon">
+              <Clock size={32} />
+            </div>
             <div className="empty-state-text">No jobs configured</div>
+            <div className="empty-state-hint">Setup automated tasks and scheduled events in your configuration.</div>
           </div>
         ) : (
           <div className="skills-list cron-list">

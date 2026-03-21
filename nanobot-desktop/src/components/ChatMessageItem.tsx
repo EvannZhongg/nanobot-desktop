@@ -1,14 +1,10 @@
-/**
- * Single chat message bubble component.
- * Memoized to prevent re-renders when other messages change.
- */
 import React, { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { 
   Copy, ChevronDown, ChevronUp, Terminal, 
   Cpu, Beaker, CheckCircle2, AlertCircle,
-  Loader2, XCircle
+  FileText, Image as ImageIcon, EyeOff, Loader2, XCircle
 } from "lucide-react";
 import type { Message, AgentStatusEvent } from "../types";
 import { cleanLogBlock, splitDebugContent } from "../utils/logUtils";
@@ -22,7 +18,39 @@ type Props = {
   onCancelSubagent?: (agentId: string) => void;
 };
 
-const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, subagentStatuses, onCancelSubagent }: Props) => {
+const BotAvatar = () => (
+  <div className="avatar bot-avatar">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2Z" fill="url(#bot-grad)" />
+      <path d="M12 18V12M12 12V6M12 12H18M12 12H6" stroke="white" strokeWidth="2" strokeLinecap="round" />
+      <defs>
+        <linearGradient id="bot-grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#6366f1" />
+          <stop offset="1" stopColor="#a855f7" />
+        </linearGradient>
+      </defs>
+    </svg>
+  </div>
+);
+
+const UserAvatar = () => (
+  <div className="avatar user-avatar">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="12" cy="12" r="10" fill="rgba(255, 255, 255, 0.1)" stroke="rgba(255, 255, 255, 0.2)" strokeWidth="1" />
+      <path d="M12 14C14.2091 14 16 12.2091 16 10C16 7.79086 14.2091 6 12 6C9.79086 6 8 7.79086 8 10C8 12.2091 9.79086 14 12 14Z" fill="white" fillOpacity="0.8" />
+      <path d="M18 19C18 16.2386 15.3137 14 12 14C8.68629 14 6 16.2386 6 19" stroke="white" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  </div>
+);
+
+const ChatMessageItem = memo(({ 
+  msg, 
+  chatFontSize, 
+  isCollapsed, 
+  toggleCollapse, 
+  subagentStatuses, 
+  onCancelSubagent 
+}: Props) => {
   const parsed = useMemo(
     () => msg.role === "bot" ? splitDebugContent(msg.content) : null,
     [msg.content, msg.role]
@@ -43,11 +71,17 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, 
 
   return (
     <div className={`message-row ${msg.role === "user" ? "user" : "bot"} ${isCollapsed ? "collapsed" : ""}`}>
+      <div className="message-avatar-container">
+        {msg.role === "bot" ? <BotAvatar /> : <UserAvatar />}
+      </div>
       <div className="bubble-wrapper">
         <div className={`bubble ${msg.role === "user" ? "user" : "bot"}`}>
           <div className="bubble-body" style={{ fontSize: `${chatFontSize}px` }}>
             {isCollapsed ? (
-              <div className="collapsed-indicator">*(Content Collapsed)*</div>
+              <div className="collapsed-indicator">
+                <EyeOff size={14} />
+                <span>Content Collapsed</span>
+              </div>
             ) : (
               <>
                 {msg.attachments && msg.attachments.length > 0 && (
@@ -58,7 +92,9 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, 
                           <img src={at.previewUrl} alt={at.name} className="message-attachment-img" />
                         ) : (
                           <div className="message-attachment-file">
-                            <span className="file-icon">{at.type.includes("pdf") ? "📄" : "📁"}</span>
+                            <span className="file-icon">
+                              {at.type.includes("image") ? <ImageIcon size={18} /> : <FileText size={18} />}
+                            </span>
                             <span className="file-name">{at.name}</span>
                           </div>
                         )}
@@ -70,7 +106,38 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, 
                   <>
                     {parsed.main ? (
                       <div className="markdown-body">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.main}</ReactMarkdown>
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            code({ node, inline, className, children, ...props }: any) {
+                              const match = /language-(\w+)/.exec(className || "");
+                              return !inline ? (
+                                <div className="code-block-wrapper">
+                                  <div className="code-block-header">
+                                    <span className="code-lang">{match ? match[1] : "text"}</span>
+                                    <button 
+                                      className="code-copy-btn"
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(String(children).replace(/\n$/, ""));
+                                      }}
+                                    >
+                                      <Copy size={12} />
+                                    </button>
+                                  </div>
+                                  <pre className={className} {...props}>
+                                    <code>{children}</code>
+                                  </pre>
+                                </div>
+                              ) : (
+                                <code className={className} {...props}>
+                                  {children}
+                                </code>
+                              );
+                            }
+                          }}
+                        >
+                          {parsed.main}
+                        </ReactMarkdown>
                       </div>
                     ) : null}
                     
@@ -79,7 +146,6 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, 
                       {subagentStatuses && Object.entries(subagentStatuses).length > 0 && (
                         <div className="live-status-container">
                           {Object.entries(subagentStatuses).map(([agentId, status]) => {
-                            // Only show if not completed or error, OR if it's very recent
                             const isActive = status.status !== "completed" && status.status !== "error";
                             if (!isActive) return null;
 
@@ -171,7 +237,9 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, 
     prev.msg.id === next.msg.id &&
     prev.chatFontSize === next.chatFontSize &&
     prev.isCollapsed === next.isCollapsed &&
-    prev.toggleCollapse === next.toggleCollapse
+    prev.toggleCollapse === next.toggleCollapse &&
+    prev.subagentStatuses === next.subagentStatuses &&
+    prev.onCancelSubagent === next.onCancelSubagent
   );
 });
 

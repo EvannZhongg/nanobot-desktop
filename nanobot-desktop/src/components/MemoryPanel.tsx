@@ -3,6 +3,7 @@
  * All memory-specific state lives here.
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { Brain, FileEdit } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MemoryFileInfo, MemoryFilePayload } from "../types";
 import { todayFileName } from "../utils/helpers";
@@ -107,8 +108,11 @@ export default function MemoryPanel({ toast }: Props) {
         <div className="memory-list">
           {files.length === 0 && !loading && (
             <div className="empty-state">
-              <div className="empty-state-icon">🧠</div>
-              <div className="empty-state-text">No daily memory files yet</div>
+              <div className="empty-state-icon">
+                <Brain size={32} />
+              </div>
+              <div className="empty-state-text">No memory files</div>
+              <div className="empty-state-hint">Daily memories are stored here to help the agent remember context.</div>
             </div>
           )}
           {files.map((file) => (
@@ -154,8 +158,11 @@ export default function MemoryPanel({ toast }: Props) {
             </>
           ) : (
             <div className="empty-state">
-              <div className="empty-state-icon">📝</div>
-              <div className="empty-state-text">Select a memory file to edit</div>
+              <div className="empty-state-icon">
+                <FileEdit size={32} />
+              </div>
+              <div className="empty-state-text">Select a memory file</div>
+              <div className="empty-state-hint">Choose a past memory to view or edit its contents.</div>
             </div>
           )}
         </div>

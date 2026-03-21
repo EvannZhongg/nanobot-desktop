@@ -1,18 +1,11 @@
-import React, { useCallback, useEffect, useState, useMemo } from "react";
+import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Cpu, Plus, Settings, Trash, ChevronDown, Globe, Smartphone, Code, CheckCircle, AlertCircle } from "lucide-react";
 import type { ConfigFilePayload, Status } from "../types";
 import { PROVIDER_REGISTRY } from "../utils/providerRegistry";
 
 // SVG Icons (Lucide inspired)
-const PlusIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>;
-const SettingsIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>;
-const TrashIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>;
-const ChevronDownIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>;
-const GlobeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>;
-const SmartphoneIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>;
-const CodeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>;
-const CheckCircleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>;
-const AlertCircleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>;
+// Removed custom SVG icons in favor of lucide-react
 
 type Props = {
   toast: { success: (m: string) => void; error: (m: string) => void; info: (m: string) => void };
@@ -45,6 +38,8 @@ export default function ModelPanel({ toast, proc }: Props) {
 
   const [oauthLoading, setOauthLoading] = useState(false);
   const [deviceAuth, setDeviceAuth] = useState<any>(null);
+  const [manualLink, setManualLink] = useState<string | null>(null);
+  const pollingRef = useRef<boolean>(false);
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -119,6 +114,8 @@ export default function ModelPanel({ toast, proc }: Props) {
   const openProviderModal = (id?: string) => {
     setDeviceAuth(null);
     setOauthLoading(false);
+    setManualLink(null);
+    pollingRef.current = false;
     if (id && configObj?.agents?.[id]) {
       setEditingProviderId(id);
       const agent = configObj.agents[id];
@@ -221,13 +218,19 @@ export default function ModelPanel({ toast, proc }: Props) {
   const handleBrowserOAuth = async () => {
     try {
       setOauthLoading(true);
-      toast.info("Waiting for browser authorization...");
+      setManualLink(null);
+      toast.info("Opening browser for authorization...");
       const tokenPayload: any = await invoke("start_browser_oauth", { provider: editType });
       if (tokenPayload && tokenPayload.access) {
         setEditKey(tokenPayload.access);
-        toast.success("Browser login successful!");
+        setManualLink(null);
+        toast.success("Login successful!");
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (e.includes("Could not open browser")) {
+        const urlMatch = e.match(/https:\/\/auth\.openai\.com[^\s]*/);
+        if (urlMatch) setManualLink(urlMatch[0]);
+      }
       toast.error(`OAuth failed: ${e}`);
     } finally {
       setOauthLoading(false);
@@ -237,6 +240,8 @@ export default function ModelPanel({ toast, proc }: Props) {
   const handleDeviceOAuth = async () => {
     try {
       setOauthLoading(true);
+      setDeviceAuth(null);
+      pollingRef.current = true;
       toast.info("Requesting device code...");
       const payload: any = await invoke("start_device_oauth", { provider: editType, region: "global" });
       setDeviceAuth(payload);
@@ -244,6 +249,7 @@ export default function ModelPanel({ toast, proc }: Props) {
     } catch (e) {
       toast.error(`Device auth failed: ${e}`);
       setOauthLoading(false);
+      pollingRef.current = false;
     }
   };
 
@@ -251,7 +257,7 @@ export default function ModelPanel({ toast, proc }: Props) {
     let interval = payload.interval * 1000;
     const expiresAt = Date.now() + (payload.expires_in * 1000);
     
-    while(Date.now() < expiresAt && modalOpen) {
+    while(Date.now() < expiresAt && modalOpen && pollingRef.current) {
       try {
         const result: any = await invoke("poll_device_oauth", { 
           provider: editType, 
@@ -260,20 +266,29 @@ export default function ModelPanel({ toast, proc }: Props) {
           region: "global"
         });
         
+        if (!pollingRef.current) break;
+
         if (result.status === "success" || result.Success) {
           const token = result.token || result.Success.token;
           setEditKey(token.access);
           setDeviceAuth(null);
-          toast.success("Device login successful!");
+          pollingRef.current = false;
+          toast.success("Login successful!");
           break;
         } else if (result.status === "error" || result.Error) {
-          throw new Error(result.message || result.Error.message);
+          const msg = result.message || (result.Error && result.Error.message) || "Unknown error";
+          toast.error(`Polling error: ${msg}`);
+          pollingRef.current = false;
+          break;
         } else {
           const slowDown = result.slow_down || (result.Pending && result.Pending.slow_down);
-          if (slowDown) interval = Math.min(interval * 1.5, 10000);
+          if (slowDown) {
+             interval = Math.min(interval * 1.5, 10000);
+             toast.info("Polling too fast, slowing down...");
+          }
         }
       } catch (e) {
-        toast.error(`Polling failed: ${e}`);
+        toast.error(`Network error: ${e}`);
         break;
       }
       await new Promise(r => setTimeout(r, interval));
@@ -314,11 +329,11 @@ export default function ModelPanel({ toast, proc }: Props) {
                 <option value="">-- Active Model --</option>
                 {allAvailableModels.map(m => <option key={m} value={m}>{m}</option>)}
               </select>
-              <div className="premium-select-icon"><ChevronDownIcon /></div>
+              <div className="premium-select-icon"><ChevronDown /></div>
             </div>
           </div>
           <button className="premium-btn premium-btn-primary" onClick={() => openProviderModal()}>
-            <PlusIcon /> Add Provider
+            <Plus /> Add Provider
           </button>
         </div>
       </div>
@@ -339,7 +354,7 @@ export default function ModelPanel({ toast, proc }: Props) {
                     <h3 style={{ margin: 0, fontSize: "16px", fontWeight: 600, color: "#0f172a", textTransform: "capitalize" }}>{rp.id}</h3>
                     <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
                       <span className={`status-badge ${hasKey ? "configured" : "missing"}`}>
-                        {hasKey ? <CheckCircleIcon /> : <AlertCircleIcon />}
+                        {hasKey ? <CheckCircle /> : <AlertCircle />}
                         {hasKey ? "Configured" : "Missing Keys"}
                       </span>
                     </div>
@@ -347,10 +362,10 @@ export default function ModelPanel({ toast, proc }: Props) {
                 </div>
                 <div style={{ display: "flex", gap: "6px" }}>
                   <button className="premium-btn premium-btn-outline" style={{ padding: "6px", height: "30px", width: "30px" }} onClick={() => openProviderModal(rp.id)}>
-                    <SettingsIcon />
+                    <Settings />
                   </button>
                   <button className="premium-btn premium-btn-outline" style={{ padding: "6px", height: "30px", width: "30px", color: "#ef4444" }} onClick={() => deleteProvider(rp.id)}>
-                    <TrashIcon />
+                    <Trash />
                   </button>
                 </div>
               </div>
@@ -370,12 +385,12 @@ export default function ModelPanel({ toast, proc }: Props) {
         })}
         
         {configuredProviders.length === 0 && (
-          <div style={{ gridColumn: "1/-1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 20px", background: "#f8fafc", borderRadius: "16px", border: "2px dashed #cbd5e1" }}>
-            <div style={{ fontSize: "32px", marginBottom: "12px", opacity: 0.8 }}>🧩</div>
+          <div style={{ gridColumn: "1/-1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 20px", background: "rgba(255, 255, 255, 0.03)", backdropFilter: "blur(12px)", borderRadius: "24px", border: "1px solid rgba(255, 255, 255, 0.1)" }}>
+            <div style={{ marginBottom: "12px", opacity: 0.8 }}><Cpu size={32} /></div>
             <h3 style={{ margin: "0 0 8px", fontSize: "16px", color: "#0f172a" }}>No Providers Configured</h3>
             <p style={{ margin: "0 0 16px", fontSize: "14px", color: "#64748b" }}>Add an AI provider connection to enable intelligent features.</p>
             <button className="premium-btn premium-btn-primary" onClick={() => openProviderModal()}>
-              Get Started <PlusIcon />
+              Get Started <Plus />
             </button>
           </div>
         )}
@@ -384,13 +399,13 @@ export default function ModelPanel({ toast, proc }: Props) {
       <div className="raw-json-panel">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setShowRawJson(!showRawJson)}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <div style={{ background: "#e2e8f0", padding: "6px", borderRadius: "8px", color: "#475569" }}><CodeIcon /></div>
+            <div style={{ background: "#e2e8f0", padding: "6px", borderRadius: "8px", color: "#475569" }}><Code /></div>
             <div>
               <h3 style={{ margin: 0, fontSize: "15px", color: "#0f172a", fontWeight: 600 }}>Advanced Settings</h3>
               <p style={{ margin: "2px 0 0", fontSize: "13px", color: "#64748b" }}>Edit raw JSON configuration source</p>
             </div>
           </div>
-          <div style={{ color: "#94a3b8", transform: showRawJson ? "rotate(180deg)" : "rotate(0)", transition: "0.2s" }}><ChevronDownIcon /></div>
+          <div style={{ color: "#94a3b8", transform: showRawJson ? "rotate(180deg)" : "rotate(0)", transition: "0.2s" }}><ChevronDown /></div>
         </div>
         
         {showRawJson && (
@@ -424,7 +439,7 @@ export default function ModelPanel({ toast, proc }: Props) {
                     <select className="premium-select" value={editType} onChange={e => handleProviderTypeChange(e.target.value)} style={{ width: "100%" }}>
                       {PROVIDER_REGISTRY.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
-                    <div className="premium-select-icon"><ChevronDownIcon /></div>
+                    <div className="premium-select-icon"><ChevronDown /></div>
                   </div>
                 </div>
               )}
@@ -453,16 +468,25 @@ export default function ModelPanel({ toast, proc }: Props) {
                 
                 <div style={{ display: "flex", gap: "10px", marginTop: "12px" }}>
                   {currentMeta?.authModes.includes("oauth_browser") && (
-                     <button onClick={handleBrowserOAuth} disabled={oauthLoading} className="premium-btn premium-btn-outline" style={{ flex: 1 }}>
-                       {oauthLoading ? "Connecting..." : <><GlobeIcon /> Web Sign-in</>}
+                     <button onClick={handleBrowserOAuth} disabled={oauthLoading} className="premium-btn premium-btn-outline" style={{ flex: 1, height: "40px" }}>
+                       {oauthLoading ? "Connecting..." : <><Globe size={16} /> Web Sign-in</>}
                      </button>
                   )}
                   {currentMeta?.authModes.includes("oauth_device") && (
-                     <button onClick={handleDeviceOAuth} disabled={oauthLoading} className="premium-btn premium-btn-outline" style={{ flex: 1 }}>
-                       {oauthLoading ? "Generating Code..." : <><SmartphoneIcon /> Device Connect</>}
+                     <button onClick={handleDeviceOAuth} disabled={oauthLoading} className="premium-btn premium-btn-outline" style={{ flex: 1, height: "40px" }}>
+                       {oauthLoading ? "Generating..." : <><Smartphone size={16} /> Device Connect</>}
                      </button>
                   )}
                 </div>
+
+                {manualLink && (
+                  <div style={{ marginTop: "12px", padding: "12px", background: "#fffbeb", border: "1px solid #fef3c7", borderRadius: "10px", fontSize: "13px" }}>
+                    <p style={{ margin: "0 0 8px", color: "#92400e", fontWeight: 600 }}>Browser didn't open?</p>
+                    <a href={manualLink} target="_blank" rel="noreferrer" style={{ color: "#b45309", wordBreak: "break-all" }}>
+                      Click here to authorize manually
+                    </a>
+                  </div>
+                )}
               </div>
 
               {deviceAuth && (

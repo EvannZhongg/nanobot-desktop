@@ -35,6 +35,8 @@ export type LogState = {
 export type Status = {
   agent: boolean;
   gateway: boolean;
+  router?: boolean;
+  subagents?: boolean;
 };
 
 export type SkillItem = {
@@ -119,6 +121,12 @@ export type SessionInfo = {
   modified?: number;
 };
 
+export type ToolExecution = {
+  name: string;
+  args: any;
+  timestamp: number;
+};
+
 export type AgentStatusEvent = {
   agent_id: string;
   chat_id: string;
@@ -126,6 +134,9 @@ export type AgentStatusEvent = {
   message?: string;
   tool_name?: string;
   tool_args?: any;
+  tool_history?: ToolExecution[];
+  start_time?: number;
+  last_update?: number;
   timestamp?: string;
   metadata?: Record<string, any>;
 };

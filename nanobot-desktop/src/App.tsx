@@ -1,5 +1,9 @@
 import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Brain, Plus, RefreshCw, Type, Minus, Plus as PlusIcon, XCircle, FilePlus, UploadCloud, FileText, Image as ImageIcon } from "lucide-react";
+import { 
+  Brain, Plus, RefreshCw, Type, Minus, Plus as PlusIcon, ArrowUp, MessageSquare, 
+  XCircle, FilePlus, UploadCloud, FileText, Image as ImageIcon, Square,
+  Check, Copy, Activity, Settings2, Router, Users, ChevronDown
+} from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 import type {
@@ -12,17 +16,19 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import Sidebar from "./components/Sidebar";
 import ChatMessageItem from "./components/ChatMessageItem";
 import ToastContainer from "./components/ToastContainer";
-import AttachmentBar from "./components/AttachmentBar";
+import { AttachmentBar } from "./components/AttachmentBar";
+import { ModelDropdown } from "./components/ModelDropdown";
+import { DropZone } from "./components/DropZone";
+
 import { useChat } from "./hooks/useChat";
 import { useProcesses } from "./hooks/useProcesses";
 import { useToast } from "./hooks/useToast";
 import { useSettings } from "./hooks/useSettings";
 
-/* -- Lazy-loaded panel components (code-split per tab) -- */
 const MonitorPanel = lazy(() => import("./components/MonitorPanel"));
 const CronPanel = lazy(() => import("./components/CronPanel"));
-const SkillsPanel = lazy(() => import("./components/SkillsPanel"));
 const SessionsPanel = lazy(() => import("./components/SessionsPanel"));
+const SkillsPanel = lazy(() => import("./components/SkillsPanel"));
 const MemoryPanel = lazy(() => import("./components/MemoryPanel"));
 const ModelPanel = lazy(() => import("./components/ModelPanel"));
 const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
@@ -99,8 +105,59 @@ const OnboardModal = React.memo(function OnboardModal({
     event.target.value = "";
   }, [handleImport]);
 
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounter = useRef(0);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current++;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    dragCounter.current = 0;
+
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      // Assuming only one file for config import
+      const file = files[0];
+      setImportName(file.name);
+      handleImport(file);
+    }
+  }, [handleImport]);
+
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="config-modal-title">
+    <div
+      className={`modal-backdrop ${isDragging ? "dragging" : ""}`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="config-modal-title"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      <DropZone isDragging={isDragging} />
       <div className="modal-card">
         <h3 id="config-modal-title">未找到配置文件</h3>
         <p>当前未检测到配置文件。你可以选择已有的 config.json，或运行 nanobot onboard 进行初始化。</p>
@@ -134,14 +191,19 @@ export default function App() {
   const dragCounter = useRef(0);
 
   const handleFileAttachment = useCallback((file: File) => {
-    const path = (file as any).path || file.name;
+    // In Tauri, files dropped or selected via Dialog often have a 'path' property
+    let path = (file as any).path || file.name;
+    
+    // Check if it's an absolute path (heuristic: starts with / or has drive letter like C:)
+    const isAbsolutePath = path.startsWith("/") || /^[a-zA-Z]:\\/.test(path);
+    
     const isImage = file.type.startsWith("image/");
     const attachment: Attachment = {
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       path,
       name: file.name,
       type: file.type,
-      previewUrl: isImage ? convertFileSrc(path) : undefined
+      previewUrl: (isImage && isAbsolutePath) ? convertFileSrc(path) : undefined
     };
     chat.addAttachment(attachment);
   }, [chat]);
@@ -318,19 +380,15 @@ export default function App() {
          onDragLeave={handleDragLeave}
          onDrop={handleDrop}
       >
-      {isDragging && (
-        <div className="window-drop-zone">
-          <div className="drop-zone-content">
-            <UploadCloud size={48} className="drop-icon" />
-            <h2>Drop files to attach</h2>
-            <p>Support for Images, PDFs, and more</p>
-          </div>
-        </div>
-      )}
+      <DropZone isDragging={isDragging} />
         <Sidebar 
           tab={tab} 
           setTab={setTab} 
-          status={proc.status} 
+          status={{
+            ...proc.status,
+            router: chat.sending,
+            subagents: Object.values(chat.subagentStatuses).some(s => s.status !== "completed" && s.status !== "error")
+          }} 
           currentSession={chat.currentSession} 
           onNewChat={chat.handleNewChat}
         />
@@ -340,52 +398,54 @@ export default function App() {
             <h1>
               {tab === "chat" ? (
                 <div className="chat-header-top-bar" style={STYLE_NO_DRAG}>
-                  <div className="header-left">
-                    <span className="header-title">Chat</span>
-                    <select
-                      value={chat.currentSession}
-                      onChange={(e) => chat.setCurrentSession(e.target.value)}
-                      className="clean-select"
-                      aria-label="Select session"
-                    >
-                      {sessions.map((s) => (
-                        <option key={s.name} value={s.name}>{s.name}</option>
-                      ))}
-                      {!sessions.some((s) => s.name === chat.currentSession) && (
-                        <option value={chat.currentSession}>{chat.currentSession}</option>
-                      )}
-                    </select>
+                  <div className="header-left command-center">
+                    <div className="breadcrumb">
+                      <span className="breadcrumb-root">Nanobot</span>
+                      <span className="breadcrumb-separator">/</span>
+                      <span className="breadcrumb-current">Chat</span>
+                    </div>
+                    <div className="session-selector-container">
+                      <ChevronDown size={14} className="selector-icon" />
+                      <select
+                        value={chat.currentSession}
+                        onChange={(e) => chat.setCurrentSession(e.target.value)}
+                        className="clean-select session-select"
+                        aria-label="Select session"
+                      >
+                        {sessions.map((s) => (
+                          <option key={s.name} value={s.name}>{s.name}</option>
+                        ))}
+                        {!sessions.some((s) => s.name === chat.currentSession) && (
+                          <option value={chat.currentSession}>{chat.currentSession}</option>
+                        )}
+                      </select>
+                    </div>
                   </div>
                   
                   <div className="header-right">
-                    <div ref={modelDropdownRef} style={STYLE_MODEL_WRAPPER}>
-                      <input
-                        value={chat.selectedModel}
-                        onChange={(e) => chat.setSelectedModel(e.target.value)}
-                        onFocus={() => setShowModelDropdown(true)}
-                        onClick={() => setShowModelDropdown(true)}
-                        className="clean-model-input"
-                        placeholder="Model configured..."
-                      />
-                      <button onClick={toggleModelDropdown} className="clean-dropdown-arrow" aria-label="Toggle model dropdown">▼</button>
-                      {showModelDropdown && (
-                        <div className="clean-model-dropdown">
-                          {chat.modelList.map((m) => (
-                            <div
-                              key={m}
-                              className={`model-dropdown-item ${chat.selectedModel === m ? "selected" : ""}`}
-                              onClick={() => handleModelSelect(m)}
-                            >
-                              {m}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    {chat.sending && (
+                      <button 
+                        onClick={chat.stopGeneration} 
+                        className="clean-action-btn stop-btn" 
+                        title="Stop Generation"
+                      >
+                        <XCircle size={14} />
+                        <span>Stop</span>
+                      </button>
+                    )}
+                    
+                    <ModelDropdown
+                      selectedModel={chat.selectedModel}
+                      setSelectedModel={chat.setSelectedModel}
+                      showDropdown={showModelDropdown}
+                      setShowDropdown={setShowModelDropdown}
+                      modelList={chat.modelList}
+                      dropdownRef={modelDropdownRef}
+                    />
                     
                     <div className="header-actions">
-                      <button onClick={() => chat.setChatFontSize((s) => Math.max(10, s - 1))} className="clean-action-btn" title="Decrease Font"><Minus size={14} /></button>
-                      <button onClick={() => chat.setChatFontSize((s) => Math.min(24, s + 1))} className="clean-action-btn" title="Increase Font"><Plus size={14} /></button>
+                      <button onClick={() => chat.setChatFontSize((s: number) => Math.max(10, s - 1))} className="clean-action-btn" title="Decrease Font"><Minus size={14} /></button>
+                      <button onClick={() => chat.setChatFontSize((s: number) => Math.min(24, s + 1))} className="clean-action-btn" title="Increase Font"><Plus size={14} /></button>
                       <button onClick={chat.handleNewChat} className="clean-action-btn highlight" title="New Chat (Cmd+N)"><Plus size={16} /></button>
                       <button onClick={chat.handleRefreshChat} className="clean-action-btn" title="Refresh Chat"><RefreshCw size={14} /></button>
                     </div>
@@ -403,18 +463,22 @@ export default function App() {
                     <div className="chat-list" ref={chat.chatListRef} onScroll={chat.handleHistoryScroll} aria-live="polite" aria-atomic="false">
                       {chat.messages.length === 0 && (
                         <div className="empty-state">
-                          <div className="empty-state-icon">💬</div>
-                          <div className="empty-state-text">Start by sending a message</div>
+                          <div className="empty-state-icon">
+                            <MessageSquare size={48} strokeWidth={1} />
+                          </div>
+                          <div className="empty-state-text">Start your journey</div>
                           <div className="empty-state-hint">Press Enter to send, Shift+Enter for new line</div>
                         </div>
                       )}
-                      {chat.messages.map((msg) => (
+                      {chat.messages.map((msg: Message) => (
                         <ChatMessageItem
                           key={msg.id}
                           msg={msg}
                           chatFontSize={chat.chatFontSize}
                           isCollapsed={chat.collapsedMsgIds.has(msg.id)}
                           toggleCollapse={chat.toggleCollapse}
+                          subagentStatuses={chat.subagentStatuses}
+                          onCancelSubagent={chat.cancelSubagent}
                         />
                       ))}
                       {chat.sending && (
@@ -462,22 +526,28 @@ export default function App() {
                               }
                             }
                           }}
-                          placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
+                          placeholder="Type a message... (Cmd+Enter to send)"
                           aria-label="Chat message input"
                         />
                         <button 
-                          onClick={chat.sendMessage} 
+                          onClick={chat.sending ? chat.stopGeneration : chat.sendMessage} 
                           onMouseDown={(e) => e.preventDefault()}
-                          disabled={chat.sending} 
-                          aria-label="Send message"
+                          disabled={!chat.sending && !chat.input.trim() && chat.attachments.length === 0}
+                          className={`send-btn ${chat.sending ? 'stop-active' : ''}`}
+                          aria-label={chat.sending ? "Stop generation" : "Send message"}
                         >
-                          {chat.sending ? "…" : "↑"}
+                          {chat.sending ? <Square size={16} fill="currentColor" /> : <ArrowUp size={20} />}
                         </button>
                       </div>
                     </div>
                   </div>
                 ) : tab === "monitor" ? (
-                  <MonitorPanel proc={proc} />
+                  <MonitorPanel 
+                    proc={proc} 
+                    subagentStatuses={chat.subagentStatuses} 
+                    onCancelSubagent={chat.cancelSubagent} 
+                    onRefreshSubagents={chat.reloadSubagents}
+                  />
                 ) : tab === "cron" ? (
                   <CronPanel toast={toast} proc={proc} />
                 ) : tab === "sessions" ? (

@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,12 +25,44 @@ const MAX_LOG_LINES: usize = 2000;
 static PRINT_LOGS: OnceLock<bool> = OnceLock::new();
 static SCAN_PROCS: OnceLock<bool> = OnceLock::new();
 
+fn get_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[derive(Default)]
 struct ProcState {
     agent: Option<Child>,
     gateway: Option<Child>,
+    active_generation: Option<u32>,
     logs: VecDeque<LogPayload>,
     emit_logs: bool,
+    subagent_registry: HashMap<String, SubagentInfo>,
+    status_cache: Option<(StatusPayload, std::time::Instant)>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SubagentInfo {
+    agent_id: String,
+    chat_id: String,
+    status: String,
+    message: Option<String>,
+    tool_name: Option<String>,
+    tool_args: Option<Value>,
+    tool_history: Vec<ToolExecution>,
+    start_time: u64,
+    last_update: u64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ToolExecution {
+    name: String,
+    args: Value,
+    timestamp: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -475,7 +507,7 @@ fn validate_memory_name(name: &str) -> Result<(), String> {
     Err("invalid memory name".to_string())
 }
 
-fn emit_log(app: &AppHandle, kind: &str, line: String, stream: &str) {
+pub(crate) fn emit_log(app: &AppHandle, kind: &str, line: String, stream: &str) {
     let payload = LogPayload {
         kind: kind.to_string(),
         line,
@@ -529,6 +561,52 @@ fn spawn_reader(
                         if let Some(pos) = line.find("__STATUS__") {
                             let json_part = &line[pos + 10..];
                             if let Ok(payload) = serde_json::from_str::<Value>(json_part) {
+                                // Update registry
+                                if let Ok(state_handle) = app.try_state::<Arc<Mutex<ProcState>>>() {
+                                    let state = state_handle.inner().clone();
+                                    let mut s = state.lock().unwrap();
+                                    
+                                    if let (Some(agent_id), Some(status)) = (
+                                        payload.get("agent_id").and_then(|v| v.as_str()),
+                                        payload.get("status").and_then(|v| v.as_str())
+                                    ) {
+                                        let entry = s.subagent_registry.entry(agent_id.to_string()).or_insert_with(|| SubagentInfo {
+                                            agent_id: agent_id.to_string(),
+                                            chat_id: payload.get("chat_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                                            status: status.to_string(),
+                                            message: payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            tool_name: payload.get("tool_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            tool_args: payload.get("tool_args").cloned(),
+                                            tool_history: Vec::new(),
+                                            start_time: get_now_ms(),
+                                            last_update: get_now_ms(),
+                                        });
+                                        
+                                        entry.status = status.to_string();
+                                        entry.message = payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                        entry.last_update = get_now_ms();
+                                        
+                                        if status == "tool_call" {
+                                            if let (Some(name), Some(args)) = (
+                                                payload.get("tool_name").and_then(|v| v.as_str()),
+                                                payload.get("tool_args")
+                                            ) {
+                                                entry.tool_name = Some(name.to_string());
+                                                entry.tool_args = Some(args.clone());
+                                                entry.tool_history.push(ToolExecution {
+                                                    name: name.to_string(),
+                                                    args: args.clone(),
+                                                    timestamp: get_now_ms(),
+                                                });
+                                            }
+                                        }
+                                        
+                                        if status == "completed" || status == "error" {
+                                            // Handle cleanup later or keep for history?
+                                            // For now keep it so the UI can show "Done".
+                                        }
+                                    }
+                                }
                                 let _ = app.emit("agent-status", payload);
                                 continue;
                             }
@@ -582,10 +660,10 @@ fn kill_process_tree(pid: u32) {
     {
         // Best-effort cross-platform cleanup
         let _ = Command::new("pkill")
-            .args(["-TERM", "-P", &pid.to_string()])
+            .args(["-9", "-P", &pid.to_string()])
             .status();
         let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args(["-9", &pid.to_string()])
             .status();
     }
 }
@@ -776,25 +854,30 @@ fn start_process_inner(
 #[tauri::command]
 fn get_status(state: State<Arc<Mutex<ProcState>>>) -> StatusPayload {
     let mut guard = state.lock().expect("state");
+    
+    // Check cache (2 second ttl)
+    if let Some((cached, instant)) = &guard.status_cache {
+        if instant.elapsed() < std::time::Duration::from_secs(2) {
+            return cached.clone();
+        }
+    }
+
     let agent_managed = refresh_child(&mut guard.agent);
     let gateway_managed = refresh_child(&mut guard.gateway);
     let scan = *SCAN_PROCS
         .get_or_init(|| std::env::var_os("NANOBOT_SCAN_PROCS").is_some());
-    let agent = if agent_managed {
-        true
-    } else if scan {
-        is_matching_process_running("agent")
-    } else {
-        false
-    };
-    let gateway = if gateway_managed {
-        true
-    } else if scan {
-        is_matching_process_running("gateway")
-    } else {
-        false
-    };
-    StatusPayload { agent, gateway }
+    
+    let agent = if agent_managed { true } 
+               else if scan { is_matching_process_running("agent") } 
+               else { false };
+               
+    let gateway = if gateway_managed { true } 
+                 else if scan { is_matching_process_running("gateway") } 
+                 else { false };
+                 
+    let payload = StatusPayload { agent, gateway };
+    guard.status_cache = Some((payload.clone(), std::time::Instant::now()));
+    payload
 }
 
 #[tauri::command]
@@ -1015,68 +1098,116 @@ fn read_session_file(
     query: Option<&str>,
 ) -> Result<Vec<SessionMessagePayload>, String> {
     let path = sessions_dir().join(name);
-    let data = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let mut rows: Vec<SessionMessagePayload> = Vec::new();
-    let lower_query = query.map(|q| q.to_lowercase());
-
-    for (idx, line) in data.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let val: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if val.get("_type").is_some() {
-            continue;
-        }
-        let content = val
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if content.is_empty() {
-            continue;
-        }
-        if let Some(q) = lower_query.as_ref() {
-            if !content.to_lowercase().contains(q) {
-                continue;
-            }
-        }
-        let role = val
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("system")
-            .to_string();
-        let created_at = val
-            .get("timestamp")
-            .or_else(|| val.get("created_at"))
-            .or_else(|| val.get("updated_at"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
-        rows.push(SessionMessagePayload {
-            id: format!("{}-{}", created_at, idx),
-            role,
-            content,
-            created_at,
-            line: idx,
-        });
-    }
-
-    let total = rows.len();
-    if offset >= total {
+    if !path.exists() {
         return Ok(Vec::new());
     }
-    let end = total.saturating_sub(offset);
-    let start = end.saturating_sub(limit);
-    let slice = rows[start..end].to_vec();
-    Ok(slice)
+
+    use std::io::{Seek, SeekFrom, Read};
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    
+    let mut rows: Vec<SessionMessagePayload> = Vec::new();
+    let lower_query = query.as_ref().map(|q| q.to_lowercase());
+
+    // If there is a query, we MUST read the whole file currently because index-less search is global.
+    // However, if no query, we can seek from the end.
+    if lower_query.is_some() {
+        let reader = std::io::BufReader::new(file);
+        use std::io::BufRead;
+        for (idx, line_res) in reader.lines().enumerate() {
+            let line = line_res.map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.contains("\"_type\":") { continue; }
+            if let Some(q) = lower_query.as_ref() {
+                if !trimmed.to_lowercase().contains(q) { continue; }
+            }
+            if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+                rows.push(parse_session_row(val, idx));
+            }
+        }
+        let total = rows.len();
+        if offset >= total { return Ok(Vec::new()); }
+        let end = total.saturating_sub(offset);
+        let start = end.saturating_sub(limit);
+        return Ok(rows[start..end].to_vec());
+    }
+
+    // High performance SEEK-FROM-END logic for pagination (No Query)
+    let mut cursor = file_len;
+    let mut buffer = vec![0u8; 8192];
+    let mut leftovers = Vec::new();
+    let mut lines_collected = Vec::new();
+    let target_count = limit + offset;
+
+    while cursor > 0 && lines_collected.len() < target_count {
+        let read_size = std::cmp::min(cursor, buffer.len() as u64);
+        cursor -= read_size;
+        file.seek(SeekFrom::Start(cursor)).map_err(|e| e.to_string())?;
+        file.read_exact(&mut buffer[..read_size as usize]).map_err(|e| e.to_string())?;
+
+        let mut pos = read_size as usize;
+        while pos > 0 {
+            pos -= 1;
+            if buffer[pos] == b'\n' {
+                let mut line_bytes = buffer[pos + 1..read_size as usize].to_vec();
+                line_bytes.extend_from_slice(&leftovers);
+                if !line_bytes.is_empty() {
+                    lines_collected.push(line_bytes);
+                }
+                leftovers.clear();
+                // If we have enough lines, we can stop
+                if lines_collected.len() >= target_count { break; }
+            }
+        }
+        if lines_collected.len() < target_count {
+            let mut new_leftovers = buffer[0..pos + (if pos == 0 && buffer[0] != b'\n' {1} else {0})].to_vec();
+            new_leftovers.extend_from_slice(&leftovers);
+            leftovers = new_leftovers;
+        }
+    }
+    // Handle very first line
+    if !leftovers.is_empty() && lines_collected.len() < target_count {
+        lines_collected.push(leftovers);
+    }
+
+    // Now lines_collected has messages in REVERSE order from the end of the file.
+    // Skip 'offset' and take 'limit'
+    let subset = lines_collected.iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|bytes| {
+            let line = String::from_utf8_lossy(bytes);
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.contains("\"_type\":") { return None; }
+            serde_json::from_str::<Value>(trimmed).ok()
+        })
+        .enumerate()
+        .map(|(i, val)| parse_session_row(val, offset + i))
+        .collect::<Vec<_>>();
+
+    // We want to return them in chronological order for the frontend
+    let mut result = subset;
+    result.reverse();
+    Ok(result)
+}
+
+fn parse_session_row(val: Value, idx: usize) -> SessionMessagePayload {
+    let content = val.get("content").and_then(Value::as_str).unwrap_or("").to_string();
+    let role = val.get("role").and_then(Value::as_str).unwrap_or("system").to_string();
+    let created_at = val.get("timestamp")
+        .or_else(|| val.get("created_at"))
+        .or_else(|| val.get("updated_at"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+
+    SessionMessagePayload {
+        id: format!("{}-{}", created_at, idx),
+        role,
+        content,
+        created_at,
+        line: idx,
+    }
 }
 
 #[tauri::command]
@@ -1261,16 +1392,20 @@ async fn send_agent_message(
         format!("User: {}", truncate_line(&message, 200)),
         "stdout",
     );
-    let app_handle = app.clone();
-    let combined = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut cmd = base_command(&app_handle);
+    
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app_inner = app.clone();
+    
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = base_command(&app_inner);
         let mut cli_args = vec![
             "-m".to_string(),
             "nanobot".to_string(),
             "agent".to_string(),
+            "chat".to_string(),
             "--message".to_string(),
             message,
-            "--session".to_string(),
+            "--session-id".to_string(),
             session_id,
         ];
         if let Some(m) = model {
@@ -1279,24 +1414,52 @@ async fn send_agent_message(
         }
         if let Some(md) = media {
             for m in md {
-                cli_args.push("--media".to_string());
+                cli_args.push("--attachment".to_string());
                 cli_args.push(m);
             }
         }
+        
         cmd.args(cli_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
 
-        let output = cmd.output().map_err(|e| e.to_string())?;
-        let mut combined = String::new();
-        combined.push_str(&String::from_utf8_lossy(&output.stdout));
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let pid = child.id();
+                if let Ok(mut guard) = app_inner.state::<Arc<Mutex<ProcState>>>().lock() {
+                    guard.active_generation = Some(pid);
+                }
 
-        Ok(combined)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+                let output = child.wait_with_output();
+                
+                if let Ok(mut guard) = app_inner.state::<Arc<Mutex<ProcState>>>().lock() {
+                    if guard.active_generation == Some(pid) {
+                        guard.active_generation = None;
+                    }
+                }
+
+                let _ = app_inner.emit("process-exit", ProcessExitPayload { kind: "agent-task".to_string() });
+
+                match output {
+                    Ok(out) => {
+                        let mut combined = String::new();
+                        combined.push_str(&String::from_utf8_lossy(&out.stdout));
+                        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                        let _ = tx.send(Ok(combined));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string()));
+            }
+        }
+    });
+
+    let combined = rx.recv().map_err(|e| e.to_string())??;
 
     let cleaned = strip_ansi(combined.as_str());
     for line in cleaned.lines() {
@@ -1342,16 +1505,45 @@ fn strip_ansi(input: &str) -> String {
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
+            // Potential ANSI escape sequence ESC [ ... <char>
+            if let Some('[') = chars.peek() {
+                let _ = chars.next(); // consume '['
+                while let Some(c) = chars.next() {
+                    if (0x40..=0x7E).contains(&(c as u8)) {
+                        break;
+                    }
                 }
+            } else {
+                // Just ESC followed by something else, skip the ESC
             }
         } else {
             out.push(ch);
         }
     }
     out
+}
+
+#[tauri::command]
+fn stop_generation(state: State<Arc<Mutex<ProcState>>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock".to_string())?;
+    if let Some(pid) = guard.active_generation.take() {
+        kill_process_tree(pid);
+        Ok(())
+    } else {
+        Err("no active generation".to_string())
+    }
+}
+
+#[tauri::command]
+fn get_subagent_registry(state: State<'_, Arc<Mutex<ProcState>>>) -> HashMap<String, SubagentInfo> {
+    let s = state.lock().unwrap();
+    s.subagent_registry.clone()
+}
+
+#[tauri::command]
+fn clear_subagent_registry(state: State<'_, Arc<Mutex<ProcState>>>) {
+    let mut s = state.lock().unwrap();
+    s.subagent_registry.clear();
 }
 
 fn main() {
@@ -1379,10 +1571,13 @@ fn main() {
                 }
             }
 
+            let agent_status = MenuItem::with_id(app, "agent_status", "Working: Status...", false, None::<&str>)?;
+            let gateway_status = MenuItem::with_id(app, "gateway_status", "Routing: Status...", false, None::<&str>)?;
+            let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+            let menu = Menu::with_items(app, &[&agent_status, &gateway_status, &sep, &show, &hide, &quit])?;
 
             if let Some(tray) = app.tray_by_id("main") {
                 tray.set_menu(Some(menu))?;
@@ -1428,6 +1623,41 @@ fn main() {
 
             let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
             let handle = app.handle().clone();
+
+            // Background task to update tray menu with real-time status
+            let state_for_tray = state.clone();
+            let agent_item_for_tray = agent_status.clone();
+            let gateway_item_for_tray = gateway_status.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let (agent_running, gateway_running) = {
+                        let mut guard = state_for_tray.lock().expect("state");
+                        let agent = refresh_child(&mut guard.agent);
+                        let gateway = refresh_child(&mut guard.gateway);
+                        (agent, gateway)
+                    };
+
+                    let agent_text = if agent_running { "Working: Running" } else { "Working: Stopped" };
+                    let gateway_text = if gateway_running { "Routing: Connected" } else { "Routing: Disconnected" };
+
+                    if let Some(tray) = handle_for_tray.tray_by_id("main") {
+                        if let Some(menu) = tray.menu() {
+                            if let Some(item) = menu.get("agent_status") {
+                                if let tauri::menu::MenuItemKind::MenuItem(mi) = item {
+                                    let _ = mi.set_text(agent_text);
+                                }
+                            }
+                            if let Some(item) = menu.get("gateway_status") {
+                                if let tauri::menu::MenuItemKind::MenuItem(mi) = item {
+                                    let _ = mi.set_text(gateway_text);
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+
             if config_path().exists() {
                 let _ = start_process_inner("agent", &state, &handle);
                 let _ = start_process_inner("gateway", &state, &handle);
@@ -1478,6 +1708,9 @@ fn main() {
             stop_process,
             send_agent_message,
             cancel_subagent,
+            stop_generation,
+            get_subagent_registry,
+            clear_subagent_registry,
             oauth::start_browser_oauth,
             oauth::start_device_oauth,
             oauth::poll_device_oauth,
