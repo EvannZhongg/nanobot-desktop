@@ -914,8 +914,18 @@ fn get_status(state: State<Arc<Mutex<ProcState>>>) -> StatusPayload {
                  else { false };
                  
     let payload = StatusPayload { 
-        agent: if agent { "Running".to_string() } else { "Offline".to_string() },
-        gateway: if gateway { "Running".to_string() } else { "Offline".to_string() },
+        agent: if agent { "Running".to_string() } else {
+            let count = guard.restart_count.get("agent").cloned().unwrap_or(0);
+            if count > 0 && count < 8 { "Restarting".to_string() } 
+            else if count >= 8 { "Crashed".to_string() } 
+            else { "Offline".to_string() }
+        },
+        gateway: if gateway { "Running".to_string() } else {
+            let count = guard.restart_count.get("gateway").cloned().unwrap_or(0);
+            if count > 0 && count < 8 { "Restarting".to_string() } 
+            else if count >= 8 { "Crashed".to_string() } 
+            else { "Offline".to_string() }
+        },
     };
     guard.status_cache = Some((payload.clone(), std::time::Instant::now()));
     payload
@@ -1666,7 +1676,7 @@ fn main() {
             let handle_clone = handle.clone();
             let state_clone = state.clone();
 
-            // Watchdog Thread: Monitor and restart processes if they crash
+            // Watchdog Thread: Monitor and restart processes with exponential backoff
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1676,47 +1686,60 @@ fn main() {
                     
                     {
                         if let Ok(mut s) = state_clone.lock() {
-                            // Check agent
+                            // --- Agent watchdog ---
                             if s.agent.is_none() && is_matching_process_running("agent") == false {
                                 let count = s.restart_count.get("agent").cloned().unwrap_or(0);
-                                if count < 5 {
+                                if count < 8 {
+                                    // Exponential backoff: 10s, 20s, 40s, 80s, 160s (cap 300s)
+                                    let backoff_secs = std::cmp::min(10u64 * 2u64.pow(count), 300);
                                     let now = std::time::Instant::now();
                                     let last = s.last_restart.get("agent").cloned();
-                                    if last.map(|l| now.duration_since(l).as_secs() > 30).unwrap_or(true) {
+                                    if last.map(|l| now.duration_since(l).as_secs() > backoff_secs).unwrap_or(true) {
                                         restart_agent = true;
                                         s.restart_count.insert("agent".to_string(), count + 1);
                                         s.last_restart.insert("agent".to_string(), now);
                                     }
                                 }
-                            } else {
-                                // Reset count if running successfully for a while
+                                // Update status cache to show Crashed/Restarting
+                                s.status_cache = None; // Force refresh on next get_status
+                            } else if s.agent.is_some() {
                                 s.restart_count.insert("agent".to_string(), 0);
                             }
 
-                            // Check gateway
+                            // --- Gateway watchdog ---
                             if s.gateway.is_none() && is_matching_process_running("gateway") == false {
                                 let count = s.restart_count.get("gateway").cloned().unwrap_or(0);
-                                if count < 5 {
+                                if count < 8 {
+                                    let backoff_secs = std::cmp::min(10u64 * 2u64.pow(count), 300);
                                     let now = std::time::Instant::now();
                                     let last = s.last_restart.get("gateway").cloned();
-                                    if last.map(|l| now.duration_since(l).as_secs() > 30).unwrap_or(true) {
+                                    if last.map(|l| now.duration_since(l).as_secs() > backoff_secs).unwrap_or(true) {
                                         restart_gateway = true;
                                         s.restart_count.insert("gateway".to_string(), count + 1);
                                         s.last_restart.insert("gateway".to_string(), now);
                                     }
                                 }
-                            } else {
+                                s.status_cache = None;
+                            } else if s.gateway.is_some() {
                                 s.restart_count.insert("gateway".to_string(), 0);
+                            }
+
+                            // --- Round 18: Cap log buffer memory ---
+                            if s.logs.len() > MAX_LOG_LINES {
+                                let excess = s.logs.len() - MAX_LOG_LINES;
+                                for _ in 0..excess {
+                                    s.logs.pop_front();
+                                }
                             }
                         }
                     }
 
                     if restart_agent {
-                        emit_log(&handle_clone, "agent", "Watchdog: Restarting agent...".to_string(), "stdout");
+                        emit_log(&handle_clone, "agent", "Watchdog: Restarting agent (exponential backoff)...".to_string(), "stdout");
                         let _ = start_process_inner("agent", &state_clone, &handle_clone);
                     }
                     if restart_gateway {
-                        emit_log(&handle_clone, "gateway", "Watchdog: Restarting gateway...".to_string(), "stdout");
+                        emit_log(&handle_clone, "gateway", "Watchdog: Restarting gateway (exponential backoff)...".to_string(), "stdout");
                         let _ = start_process_inner("gateway", &state_clone, &handle_clone);
                     }
                 }

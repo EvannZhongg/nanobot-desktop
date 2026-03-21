@@ -15,16 +15,27 @@ async def async_retry(
     exceptions: tuple[Type[Exception], ...] = (Exception,),
     name: str = "Request",
     retry_on_status: tuple[int, ...] = (429, 500, 502, 503, 504),
+    timeout: float = 60.0,
 ) -> T:
     """
-    Retry an async function with exponential backoff and error categorization.
+    Retry an async function with exponential backoff, error categorization,
+    and per-attempt timeout protection.
     """
     import httpx
     
     delay = 1.0
     for i in range(retries + 1):
         try:
-            return await func()
+            # Enforce per-attempt timeout to prevent hung connections
+            return await asyncio.wait_for(func(), timeout=timeout)
+        except asyncio.TimeoutError:
+            if i == retries:
+                logger.error(f"{name} timed out after {timeout}s on attempt {i+1}")
+                log_stability_event("TIMEOUT", f"{name} timed out after {timeout}s, {retries} retries exhausted.")
+                raise
+            logger.warning(f"{name} timeout on attempt {i+1}/{retries}, retrying in {delay}s...")
+            await asyncio.sleep(delay)
+            delay *= backoff
         except exceptions as e:
             # Categorize error
             should_retry = True
@@ -48,6 +59,7 @@ async def async_retry(
             delay *= backoff
     
     raise RuntimeError("Retry loop logic failed")
+
 
 def with_retry(retries: int = 3, backoff: float = 2.0, exceptions: tuple[Type[Exception], ...] = (Exception,), name: str | None = None):
     """Decorator version of async_retry."""

@@ -96,7 +96,7 @@ const ChatMessageItem = memo(({
   const roleLabel = msg.role === "user" ? "You" : "Assistant";
 
   return (
-    <div className={`message-row ${msg.role === "user" ? "user" : "bot"} ${isCollapsed ? "collapsed" : ""}`}>
+    <div id={`msg-${msg.id}`} className={`message-row ${msg.role === "user" ? "user" : "bot"} ${isCollapsed ? "collapsed" : ""}`}>
       <div className="message-avatar-container">
         {msg.role === "bot" ? <BotAvatar /> : <UserAvatar />}
       </div>

@@ -574,53 +574,7 @@ body {
   font-size: 13px;
 }
 
-.empty-state {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  gap: 16px;
-  animation: fadeIn 0.8s ease-out;
-}
-
-.empty-state-icon {
-  opacity: 0.2;
-  transform: translateY(10px);
-  animation: float 4s infinite ease-in-out;
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(10px); }
-  50% { transform: translateY(0); }
-}
-
-.empty-state-text {
-  font-family: var(--font-display);
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text);
-  opacity: 0.8;
-}
-
-.empty-state-hint {
-  font-size: 13px;
-  opacity: 0.5;
-}
-
-.collapsed-indicator {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--panel-2);
-  border-radius: var(--radius-md);
-  color: var(--muted);
-  font-size: 13px;
-  font-style: italic;
-  border: 1px dashed var(--border);
-}
+/* [Deduplicated] .empty-state, .collapsed-indicator moved to bottom of file */
 
 .content {
   display: flex;
@@ -643,61 +597,9 @@ body {
   scroll-behavior: smooth;
 }
 
-.message-row {
-  display: flex;
-  flex-direction: column;
-  max-width: 88%;
-  gap: 8px;
-  animation: slideIn var(--transition-base) backwards;
-}
+/* [Deduplicated] .message-row base styles moved to Round 6 section */
 
-.message-row.user {
-  align-self: flex-end;
-}
-
-.message-row.bot {
-  align-self: flex-start;
-}
-
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(10px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-.bubble-wrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.bubble {
-  padding: 16px 20px;
-  border-radius: var(--radius-lg);
-  position: relative;
-  line-height: 1.6;
-  font-size: 15px;
-  transition: all var(--transition-base);
-}
-
-.bubble.user {
-  background: var(--accent);
-  color: white;
-  border-bottom-right-radius: 4px;
-  box-shadow: 0 4px 12px hsla(221, 83%, 53%, 0.15);
-}
-
-.bubble.bot {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-bottom-left-radius: 4px;
-  box-shadow: var(--shadow-md);
-}
-
-.bubble.bot:hover {
-  box-shadow: var(--shadow-lg);
-  border-color: var(--accent-soft);
-}
+/* [Deduplicated] .bubble base styles moved to Round 6 section */
 
 .plain-text-body {
   white-space: pre-wrap;
@@ -783,87 +685,8 @@ body {
   gap: 10px;
 }
 
-/* --- Code Blocks (Round 7) --- */
-.code-block-wrapper {
-  margin: 16px 0;
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: #0f172a;
-}
+/* [Deduplicated] .code-block-wrapper, .code-block-header, .code-lang, .code-copy-btn, .markdown-body pre/code moved to Round 8 section */
 
-.code-block-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 4px 12px;
-  background: hsla(0, 0%, 100%, 0.05);
-  border-bottom: 1px solid hsla(0, 0%, 100%, 0.05);
-  font-family: var(--font-mono, monospace);
-  font-size: 11px;
-  color: #94a3b8;
-}
-
-.code-run-btn {
-  background: hsla(var(--h), 83%, 53%, 0.2);
-  border: 1px solid hsla(var(--h), 83%, 53%, 0.3);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 800;
-  padding: 2px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.code-run-btn:hover {
-  background: var(--accent);
-  color: #000;
-  box-shadow: 0 0 10px var(--accent);
-}
-
-.code-lang {
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.code-copy-btn {
-  background: transparent;
-  border: none;
-  color: #64748b;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  transition: all 0.2s;
-}
-
-.code-copy-btn:hover {
-  background: hsla(0, 0%, 100%, 0.1);
-  color: white;
-}
-
-.markdown-body pre {
-  margin: 0;
-  padding: 16px;
-  overflow-x: auto;
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.markdown-body code {
-  font-family: 'JetBrains Mono', 'Fira Code', var(--font-mono, monospace);
-}
-
-.markdown-body :not(pre) > code {
-  background: var(--accent-soft);
-  color: var(--accent);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
 .time-stamp {
   font-size: 10px;
   color: var(--muted);
@@ -3631,6 +3454,118 @@ kbd {
   padding: 32px;
   background: transparent;
   scroll-behavior: smooth;
+}
+
+/* Round 38: Highlight Pulse for scroll-to-source */
+@keyframes highlightPulse {
+  0% { box-shadow: 0 0 0 0 hsla(var(--h), 83%, 53%, 0.4); }
+  50% { box-shadow: 0 0 0 6px hsla(var(--h), 83%, 53%, 0.15); }
+  100% { box-shadow: 0 0 0 0 hsla(var(--h), 83%, 53%, 0); }
+}
+
+.message-row.highlight-pulse {
+  animation: highlightPulse 1s ease-out 2;
+  border-radius: 16px;
+}
+
+/* Round 39: Collapsible Sections in Side Panel */
+.collapsible-section {
+  margin: 8px 0;
+  border: 1px solid hsla(var(--h), 20%, 40%, 0.15);
+  border-radius: 10px;
+  overflow: hidden;
+  background: hsla(var(--h), 20%, 15%, 0.2);
+}
+
+.collapsible-heading {
+  display: block;
+  padding: 10px 16px;
+  cursor: pointer;
+  font-weight: 700;
+  color: hsla(0, 0%, 100%, 0.9);
+  list-style: none;
+  transition: background 0.2s ease;
+  user-select: none;
+}
+
+.collapsible-heading::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible-heading::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 0.2s ease;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+details[open] > .collapsible-heading::before {
+  transform: rotate(90deg);
+}
+
+.collapsible-heading:hover {
+  background: hsla(var(--h), 20%, 30%, 0.2);
+}
+
+.h2-heading {
+  font-size: 16px;
+  border-bottom: 1px solid hsla(var(--h), 20%, 40%, 0.1);
+}
+
+.h3-heading {
+  font-size: 14px;
+  padding-left: 24px;
+}
+
+/* Round 41: Light Mode Compatibility for Side Panel */
+:root:not(.dark) .side-document-panel {
+  background: hsla(var(--h), 30%, 97%, 0.85);
+  border-left: 1px solid hsla(var(--h), 20%, 80%, 0.5);
+  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.08), inset 1px 0 0 hsla(0, 0%, 100%, 0.8);
+}
+
+:root:not(.dark) .side-panel-header {
+  background: hsla(var(--h), 30%, 96%, 0.9);
+  border-bottom-color: hsla(var(--h), 20%, 80%, 0.3);
+}
+
+:root:not(.dark) .side-panel-header h3 {
+  color: var(--text);
+}
+
+:root:not(.dark) .side-panel-resizer:hover {
+  background: hsla(var(--h), 83%, 53%, 0.15);
+}
+
+:root:not(.dark) .collapsible-section {
+  background: hsla(var(--h), 20%, 95%, 0.4);
+  border-color: hsla(var(--h), 20%, 80%, 0.3);
+}
+
+:root:not(.dark) .collapsible-heading {
+  color: var(--text);
+}
+
+:root:not(.dark) .collapsible-heading:hover {
+  background: hsla(var(--h), 20%, 90%, 0.4);
+}
+
+:root:not(.dark) .panel-action-btn {
+  background: hsla(var(--h), 20%, 90%, 0.4);
+  border-color: hsla(var(--h), 20%, 80%, 0.3);
+  color: var(--muted);
+}
+
+:root:not(.dark) .list-nav-select {
+  background: hsla(var(--h), 20%, 96%, 0.8);
+  border-color: hsla(var(--h), 20%, 80%, 0.3);
+  color: var(--text);
+}
+
+:root:not(.dark) .progress-bar-bg {
+  background: hsla(var(--h), 20%, 85%, 0.4);
 }
 
 /* --- Execution List Trigger UI (Antigravity Gloss) --- */

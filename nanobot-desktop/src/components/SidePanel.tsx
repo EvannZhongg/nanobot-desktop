@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { X, Copy, Maximize2, Minimize2 } from "lucide-react";
+import { X, Copy, Maximize2 } from "lucide-react";
 import ErrorBoundary from "./ErrorBoundary";
 
 type Props = {
@@ -99,14 +99,26 @@ const SidePanel: React.FC<Props> = React.memo(({
     }
   }, [currentMessageId]);
 
+  // Round 44: Edge case guard
+  const safeContent = content || "";
+  if (!safeContent.trim()) return null;
+
   return (
     <div 
       className={`side-document-panel ${isResizing ? 'resizing' : ''}`}
       style={{ width: `${width}px` }}
+      role="complementary"
+      aria-label={title}
     >
-      <div className="side-panel-resizer" onMouseDown={startResizing} />
+      <div 
+        className="side-panel-resizer" 
+        onMouseDown={startResizing}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panel"
+      />
       
-      <div className="side-panel-header">
+      <div className="side-panel-header" role="toolbar" aria-label="Panel actions">
         <div className="side-panel-title">
           <span className="title-icon" onClick={scrollToSource} style={{ cursor: 'pointer' }} title="Scroll to source message">📜</span>
           <div className="title-stack">
@@ -164,7 +176,7 @@ const SidePanel: React.FC<Props> = React.memo(({
           </button>
         </div>
       </div>
-      <div className="side-panel-body" ref={bodyRef} onScroll={handleScroll}>
+      <div className="side-panel-body" ref={bodyRef} onScroll={handleScroll} role="document" aria-live="polite">
         <ErrorBoundary fallbackMessage="Failed to render execution list content">
           <div className="markdown-body">
             <ReactMarkdown 
@@ -210,7 +222,7 @@ const SidePanel: React.FC<Props> = React.memo(({
                 }
               }}
             >
-              {content}
+              {safeContent}
             </ReactMarkdown>
           </div>
         </ErrorBoundary>
