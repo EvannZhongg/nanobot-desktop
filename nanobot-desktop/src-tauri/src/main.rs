@@ -13,6 +13,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 mod oauth;
+mod indexer;
+mod vector;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -515,7 +517,7 @@ fn spawn_reader(
 
             loop {
                 let split_at = pending
-                    .find(|c| c == '\n' || c == '\r')
+                    .find(['\n', '\r'])
                     .unwrap_or(usize::MAX);
                 if split_at == usize::MAX {
                     break;
@@ -630,11 +632,11 @@ fn is_matching_process_running(kind: &str) -> bool {
     }
     #[cfg(not(windows))]
     {
-        return Command::new("pgrep")
+        Command::new("pgrep")
             .args(["-f", pattern])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 }
 
@@ -1089,7 +1091,7 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
             continue;
         }
         let metadata = entry.metadata().ok();
-        let size = metadata.as_ref().and_then(|m| Some(m.len()));
+        let size = metadata.as_ref().map(|m| m.len());
         let modified = metadata
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -1301,7 +1303,7 @@ fn strip_ansi(input: &str) -> String {
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if ('@'..='~').contains(&next) {
                     break;
                 }
@@ -1315,10 +1317,14 @@ fn strip_ansi(input: &str) -> String {
 
 fn main() {
     let state = Arc::new(Mutex::new(ProcState::default()));
+    let db_path = nanobot_home().join("vector.db");
+    let db_conn = vector::init_db(db_path.to_str().unwrap()).expect("Failed to init SQLite db");
+    let db_state = vector::DbState(Mutex::new(db_conn));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .manage(db_state)
         .setup(|app| {
             #[cfg(target_os = "macos")]
             if let Ok(app_menu) = Menu::default(app.handle()) {
@@ -1434,7 +1440,10 @@ fn main() {
             send_agent_message,
             oauth::start_browser_oauth,
             oauth::start_device_oauth,
-            oauth::poll_device_oauth
+            oauth::poll_device_oauth,
+            indexer::search_workspace,
+            vector::chunk_and_store,
+            vector::search_chunks
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

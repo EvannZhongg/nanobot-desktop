@@ -41,7 +41,7 @@ fn pkce_challenge(verifier: &str) -> String {
 
 fn random_string() -> String {
     let bytes: [u8; 32] = rand::random();
-    URL_SAFE_NO_PAD.encode(&bytes)
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[tauri::command]
