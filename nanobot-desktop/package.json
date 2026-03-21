@@ -8,7 +8,8 @@
     "build": "vite build",
     "prepare:runtime": "python scripts/prepare_runtime.py",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "install:mac": "bash scripts/install_mac.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
