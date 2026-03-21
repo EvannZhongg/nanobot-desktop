@@ -26,6 +26,7 @@ export function useChat(sessions: SessionInfo[]) {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [collapsedMsgIds, setCollapsedMsgIds] = useState<Set<string>>(new Set());
   const [lastSelectedFolder, setLastSelectedFolder] = useState<string | null>(null);
+  const [pinnedDirectory, setPinnedDirectory] = useState<string | null>(null);
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -65,13 +66,13 @@ export function useChat(sessions: SessionInfo[]) {
       return listen<AgentStatusEvent>("agent-status", (event) => {
         setSubagentStatuses((prev) => {
           const payload = event.payload;
-          const existing = prev[payload.agent_id];
+          const existing = prev[payload.agentId];
           
           // If it's a tool_call, we might want to preserve history 
           // if the event itself doesn't contain it (Rust backend sends history too now)
           return {
             ...prev,
-            [payload.agent_id]: {
+            [payload.agentId]: {
               ...existing,
               ...payload
             },
@@ -253,43 +254,57 @@ export function useChat(sessions: SessionInfo[]) {
   const triggerLock = useRef(false);
 
   const handleInputChange = useCallback(async (newText: string) => {
-    // Basic text update
+    const prevText = input;
     setInput(newText);
-    
+
     // Check for trigger patterns
     if (triggerLock.current) return;
     
-    const match = newText.match(/(^|\s)([!@])$/);
+    // Only trigger if we are at the end of the text (or adding a char)
+    // and the last character is exactly ! or @ preceded by whitespace/start
+    // Check for trigger patterns: ! (directory/file), !! (pinned directory), @ (agent/skill)
+    const match = newText.match(/(?:^|\s)(!{1,2}|@)$/);
     if (!match) return;
-    
-    const trigger = match[2];
-    const isDir = trigger === "!";
+
+    const trigger = match[1];
+    const isPinTrigger = trigger === "!!";
+    const isDirTrigger = trigger === "!" || isPinTrigger;
     
     triggerLock.current = true;
     try {
       const selected = await open({
-        directory: isDir,
-        defaultPath: isDir ? undefined : (lastSelectedFolder ?? undefined)
+        directory: isDirTrigger,
+        multiple: false,
+        // If it's a pin trigger, we pick a new directory. 
+        // If it's a normal trigger and we have a pin, start there.
+        defaultPath: isPinTrigger ? (lastSelectedFolder ?? undefined) : (pinnedDirectory ?? lastSelectedFolder ?? undefined)
       });
       
       if (selected && typeof selected === "string") {
-        if (isDir) setLastSelectedFolder(selected);
-        setInput(prev => {
-          // Robust replacement: find the trigger character at the end of where it was
-          // and replace it with the selected path.
-          if (prev.endsWith(trigger)) {
-            return prev.slice(0, -1) + selected + " ";
+        if (isPinTrigger) {
+          setPinnedDirectory(selected);
+          setLastSelectedFolder(selected);
+        } else if (isDirTrigger) {
+          setLastSelectedFolder(selected);
+        }
+
+        setInput(current => {
+          // Double check the trigger still exists at the end
+          if (current.endsWith(trigger)) {
+            // For pin trigger, we just remove the !! and don't necessarily insert the path if it's meant to be a state change 
+            // BUT the user said "triggers after !!", so maybe we should insert the path too or just acknowledge.
+            // Let's insert the path as a confirmation.
+            return current.slice(0, -trigger.length).trimEnd() + " " + selected + " ";
           }
-          return prev;
+          return current;
         });
       }
     } catch (err) {
       console.error("Trigger fail", err);
     } finally {
-      // Small cooldown to prevent immediate re-trigger if UI events double-fire
-      setTimeout(() => { triggerLock.current = false; }, 300);
+      setTimeout(() => { triggerLock.current = false; }, 500);
     }
-  }, [lastSelectedFolder]);
+  }, [input, lastSelectedFolder, pinnedDirectory]);
 
   const cancelSubagent = useCallback(async (agentId: string) => {
     try {
@@ -299,21 +314,30 @@ export function useChat(sessions: SessionInfo[]) {
     }
   }, []);
 
-  const stopGeneration = useCallback(async () => {
-    setSending(false); // Immediate UI feedback
-    try {
-      await invoke("stop_generation");
-    } catch (err) {
-      console.error("Failed to stop generation", err);
-    }
-  }, []);
-
   const reloadSubagents = useCallback(async () => {
     try {
       const registry = await invoke<Record<string, AgentStatusEvent>>("get_subagent_registry");
       setSubagentStatuses(registry || {});
     } catch (err) {
       console.error("Failed to reload subagent registry", err);
+    }
+  }, []);
+
+  const cancelAllSubagents = useCallback(async () => {
+    try {
+      await invoke("cancel_all_subagents");
+      await reloadSubagents();
+    } catch (err) {
+      console.error("Cancel all fail", err);
+    }
+  }, [reloadSubagents]);
+
+  const stopGeneration = useCallback(async () => {
+    setSending(false); // Immediate UI feedback
+    try {
+      await invoke("stop_generation");
+    } catch (err) {
+      console.error("Failed to stop generation", err);
     }
   }, []);
 
@@ -331,7 +355,8 @@ export function useChat(sessions: SessionInfo[]) {
     loadHistoryChunk,    handleHistoryScroll,
     sendMessage, handleInputKeyDown,
     attachments, addAttachment, removeAttachment,
-    subagentStatuses, cancelSubagent, stopGeneration,
+    pinnedDirectory, setPinnedDirectory,
+    subagentStatuses, cancelSubagent, cancelAllSubagents, stopGeneration,
     reloadSubagents,
   };
 }

@@ -166,7 +166,7 @@ const ChatMessageItem = memo(({
                                 </div>
                                 <div className="status-body">
                                   <div className="status-badge">{status.status}</div>
-                                  <div className="status-text">{status.message || (status.tool_name ? `Using ${status.tool_name}...` : "Thinking...")}</div>
+                                  <div className="status-text">{status.message || (status.toolName ? `Using ${status.toolName}...` : "Thinking...")}</div>
                                 </div>
                               </div>
                             );

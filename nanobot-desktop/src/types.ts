@@ -128,15 +128,15 @@ export type ToolExecution = {
 };
 
 export type AgentStatusEvent = {
-  agent_id: string;
-  chat_id: string;
+  agentId: string;
+  chatId: string;
   status: "thinking" | "tool_call" | "progress" | "completed" | "error";
   message?: string;
-  tool_name?: string;
-  tool_args?: any;
-  tool_history?: ToolExecution[];
-  start_time?: number;
-  last_update?: number;
+  toolName?: string;
+  toolArgs?: any;
+  toolHistory?: ToolExecution[];
+  startTime?: number;
+  lastUpdate?: number;
   timestamp?: string;
   metadata?: Record<string, any>;
 };

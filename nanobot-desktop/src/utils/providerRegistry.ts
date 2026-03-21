@@ -41,7 +41,7 @@ export const PROVIDER_REGISTRY: ProviderMeta[] = [
     showBaseUrl: true, 
     defaultModel: 'gemini-2.5-pro', 
     category: 'official', 
-    authModes: ['api_key'] 
+    authModes: ['api_key', 'oauth_browser'] 
   },
   { 
     id: 'minimax', 

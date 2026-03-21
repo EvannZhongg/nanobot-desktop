@@ -502,6 +502,21 @@ export default function App() {
                       )}
                     </div>
                     <div className="input-row-container">
+                      {chat.pinnedDirectory && (
+                        <div className="pinned-scope">
+                          <div className="scope-tag">
+                            <Router size={12} className="scope-icon" />
+                            <span className="scope-text">Scoped: {chat.pinnedDirectory}</span>
+                            <button 
+                              className="clear-scope" 
+                              onClick={() => chat.setPinnedDirectory(null)}
+                              title="Clear pinned scope"
+                            >
+                              <XCircle size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       <AttachmentBar
                         attachments={chat.attachments}
                         onRemove={chat.removeAttachment}
@@ -545,7 +560,8 @@ export default function App() {
                   <MonitorPanel 
                     proc={proc} 
                     subagentStatuses={chat.subagentStatuses} 
-                    onCancelSubagent={chat.cancelSubagent} 
+                    onCancelSubagent={chat.cancelSubagent}
+                    onCancelAllSubagents={chat.cancelAllSubagents}
                     onRefreshSubagents={chat.reloadSubagents}
                   />
                 ) : tab === "cron" ? (
@@ -558,7 +574,7 @@ export default function App() {
                     toast={toast}
                   />
                 ) : tab === "skills" ? (
-                  <SkillsPanel toast={toast} />
+                  <SkillsPanel toast={toast} pinnedDirectory={chat.pinnedDirectory} />
                 ) : tab === "memory" ? (
                   <MemoryPanel toast={toast} />
                 ) : tab === "models" ? (

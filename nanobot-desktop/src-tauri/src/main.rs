@@ -8,13 +8,13 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+use tauri::menu::Menu;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 mod oauth;
 mod indexer;
 mod vector;
+mod tray;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -33,43 +33,44 @@ fn get_now_ms() -> u64 {
 }
 
 #[derive(Default)]
-struct ProcState {
-    agent: Option<Child>,
-    gateway: Option<Child>,
-    active_generation: Option<u32>,
-    logs: VecDeque<LogPayload>,
-    emit_logs: bool,
-    subagent_registry: HashMap<String, SubagentInfo>,
-    status_cache: Option<(StatusPayload, std::time::Instant)>,
+pub struct ProcState {
+    pub agent: Option<Child>,
+    pub gateway: Option<Child>,
+    pub active_generation: Option<u32>,
+    pub logs: VecDeque<LogPayload>,
+    pub emit_logs: bool,
+    pub subagent_registry: HashMap<String, SubagentInfo>,
+    pub status_cache: Option<(StatusPayload, std::time::Instant)>,
 }
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
-struct SubagentInfo {
-    agent_id: String,
-    chat_id: String,
-    status: String,
-    message: Option<String>,
-    tool_name: Option<String>,
-    tool_args: Option<Value>,
-    tool_history: Vec<ToolExecution>,
-    start_time: u64,
-    last_update: u64,
+pub struct SubagentInfo {
+    pub agent_id: String,
+    pub chat_id: String,
+    pub status: String,
+    pub message: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_args: Option<Value>,
+    pub tool_history: Vec<ToolExecution>,
+    pub start_time: u64,
+    pub last_update: u64,
+    pub pid: Option<u32>,
 }
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
-struct ToolExecution {
-    name: String,
-    args: Value,
-    timestamp: u64,
+pub struct ToolExecution {
+    pub name: String,
+    pub args: Value,
+    pub timestamp: u64,
 }
 
 #[derive(Serialize, Clone)]
-struct LogPayload {
-    kind: String,
-    line: String,
-    stream: String,
+pub struct LogPayload {
+    pub kind: String,
+    pub line: String,
+    pub stream: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -77,10 +78,10 @@ struct ProcessExitPayload {
     kind: String,
 }
 
-#[derive(Serialize)]
-struct StatusPayload {
-    agent: bool,
-    gateway: bool,
+#[derive(Serialize, Clone)]
+pub struct StatusPayload {
+    pub agent: bool,
+    pub gateway: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -562,7 +563,7 @@ fn spawn_reader(
                             let json_part = &line[pos + 10..];
                             if let Ok(payload) = serde_json::from_str::<Value>(json_part) {
                                 // Update registry
-                                if let Ok(state_handle) = app.try_state::<Arc<Mutex<ProcState>>>() {
+                                if let Some(state_handle) = app.try_state::<Arc<Mutex<ProcState>>>() {
                                     let state = state_handle.inner().clone();
                                     let mut s = state.lock().unwrap();
                                     
@@ -580,11 +581,15 @@ fn spawn_reader(
                                             tool_history: Vec::new(),
                                             start_time: get_now_ms(),
                                             last_update: get_now_ms(),
+                                            pid: payload.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32),
                                         });
                                         
                                         entry.status = status.to_string();
                                         entry.message = payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
                                         entry.last_update = get_now_ms();
+                                        if let Some(pid) = payload.get("pid").and_then(|v| v.as_u64()) {
+                                            entry.pid = Some(pid as u32);
+                                        }
                                         
                                         if status == "tool_call" {
                                             if let (Some(name), Some(args)) = (
@@ -600,15 +605,39 @@ fn spawn_reader(
                                                 });
                                             }
                                         }
-                                        
-                                        if status == "completed" || status == "error" {
-                                            // Handle cleanup later or keep for history?
-                                            // For now keep it so the UI can show "Done".
-                                        }
                                     }
+                                    let _ = app.emit("agent-status", payload.clone());
+                                    continue;
                                 }
-                                let _ = app.emit("agent-status", payload);
-                                continue;
+                            }
+                        }
+                    }
+                    
+                    if line.contains("Spawned subagent") && line.contains("PID:") {
+                        static RE: OnceLock<regex::Regex> = OnceLock::new();
+                        let re = RE.get_or_init(|| regex::Regex::new(r"Spawned subagent ([a-f0-9-]+).*PID: (\d+)").unwrap());
+                        if let Some(caps) = re.captures(&line) {
+                            let agent_id = caps.get(1).map(|m| m.as_str().to_string());
+                            let pid = caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+                            
+                            if let (Some(id), Some(p)) = (agent_id, pid) {
+                                let id_str: String = id;
+                                if let Some(state_handle) = app.try_state::<Arc<Mutex<ProcState>>>() {
+                                    let mut s = state_handle.lock().unwrap();
+                                    let entry = s.subagent_registry.entry(id_str.clone()).or_insert_with(|| SubagentInfo {
+                                        agent_id: id_str.clone(),
+                                        chat_id: "".to_string(),
+                                        status: "thinking".to_string(),
+                                        message: None,
+                                        tool_name: None,
+                                        tool_args: None,
+                                        tool_history: Vec::new(),
+                                        start_time: get_now_ms(),
+                                        last_update: get_now_ms(),
+                                        pid: Some(p),
+                                    });
+                                    entry.pid = Some(p);
+                                }
                             }
                         }
                     }
@@ -638,7 +667,7 @@ fn spawn_reader(
     });
 }
 
-fn refresh_child(child: &mut Option<Child>) -> bool {
+pub fn refresh_child(child: &mut Option<Child>) -> bool {
     if let Some(proc) = child.as_mut() {
         if let Ok(Some(_)) = proc.try_wait() {
             *child = None;
@@ -668,7 +697,7 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
-fn kill_matching_processes(kind: &str) {
+pub fn kill_matching_processes(kind: &str) {
     #[cfg(windows)]
     {
         let pattern = match kind {
@@ -727,7 +756,7 @@ fn is_matching_process_running(kind: &str) -> bool {
     }
 }
 
-fn stop_all_processes(state: &Arc<Mutex<ProcState>>) {
+pub fn stop_all_processes(state: &Arc<Mutex<ProcState>>) {
     if let Ok(mut guard) = state.lock() {
         if let Some(mut child) = guard.agent.take() {
             let pid = child.id();
@@ -894,8 +923,12 @@ fn set_log_streaming(enabled: bool, state: State<Arc<Mutex<ProcState>>>) {
 }
 
 #[tauri::command]
-fn list_workspace_skills() -> Result<Vec<SkillInfo>, String> {
-    let dir = workspace_skills_dir();
+fn list_workspace_skills(path: Option<String>) -> Result<Vec<SkillInfo>, String> {
+    let dir = if let Some(p) = path {
+        PathBuf::from(p)
+    } else {
+        workspace_skills_dir()
+    };
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -1425,7 +1458,7 @@ async fn send_agent_message(
             .stdin(Stdio::null());
 
         match cmd.spawn() {
-            Ok(mut child) => {
+            Ok(child) => {
                 let pid = child.id();
                 if let Ok(mut guard) = app_inner.state::<Arc<Mutex<ProcState>>>().lock() {
                     guard.active_generation = Some(pid);
@@ -1471,13 +1504,46 @@ async fn send_agent_message(
 }
 
 #[tauri::command]
+async fn cancel_all_subagents(state: tauri::State<'_, Arc<Mutex<ProcState>>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "poisoned")?;
+    let pids: Vec<u32> = guard.subagent_registry.values().filter_map(|s| s.pid).collect();
+    
+    for pid in pids {
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    }
+    
+    // Update all active ones to error
+    for info in guard.subagent_registry.values_mut() {
+        if info.status != "completed" && info.status != "error" {
+            info.status = "error".to_string();
+            info.message = Some("All tasks stopped".to_string());
+        }
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
 async fn cancel_subagent(app: AppHandle, agent_id: String) -> Result<(), String> {
     emit_log(&app, "agent", format!("Cancelling subagent {}", agent_id), "stdout");
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let mut cmd = base_command(&app);
+    
+    // 1. Try stored PID first (force kill)
+    if let Ok(guard) = app.state::<Arc<Mutex<ProcState>>>().lock() {
+        if let Some(info) = guard.subagent_registry.get(&agent_id) {
+            if let Some(pid) = info.pid {
+                let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            }
+        }
+    }
+
+    // 2. Also try the normal CLI cancel way in background
+    let app_for_bg = app.clone();
+    let agent_id_for_bg = agent_id.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut cmd = base_command(&app_for_bg);
         cmd.args([
             "-m", "nanobot", "agent", 
-            "--cancel-subagent", &agent_id
+            "--cancel-subagent", &agent_id_for_bg
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1490,7 +1556,17 @@ async fn cancel_subagent(app: AppHandle, agent_id: String) -> Result<(), String>
         Ok(())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    // 3. Update registry status
+    if let Ok(mut guard) = app.state::<Arc<Mutex<ProcState>>>().lock() {
+        if let Some(info) = guard.subagent_registry.get_mut(&agent_id) {
+            info.status = "error".to_string();
+            info.message = Some("Cancelled by user".to_string());
+        }
+    }
+    
+    Ok(())
 }
 
 fn truncate_line(s: &str, max_len: usize) -> String {
@@ -1571,92 +1647,10 @@ fn main() {
                 }
             }
 
-            let agent_status = MenuItem::with_id(app, "agent_status", "Working: Status...", false, None::<&str>)?;
-            let gateway_status = MenuItem::with_id(app, "gateway_status", "Routing: Status...", false, None::<&str>)?;
-            let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
-            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&agent_status, &gateway_status, &sep, &show, &hide, &quit])?;
+            tray::init(app.handle())?;
 
-            if let Some(tray) = app.tray_by_id("main") {
-                tray.set_menu(Some(menu))?;
-                tray.on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.hide();
-                        }
-                    }
-                    "quit" => {
-                        // Ensure child processes exit with the desktop app.
-                        let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
-                        stop_all_processes(&state);
-                        // Best-effort cleanup for any lingering nanobot processes.
-                        kill_matching_processes("agent");
-                        kill_matching_processes("gateway");
-                        app.exit(0);
-                    }
-                    _ => {}
-                });
-                tray.on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button,
-                        button_state,
-                        ..
-                    } = event
-                    {
-                        if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                            if let Some(window) = tray.app_handle().get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                    }
-                });
-            }
-
+            let handle = app.handle();
             let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
-            let handle = app.handle().clone();
-
-            // Background task to update tray menu with real-time status
-            let state_for_tray = state.clone();
-            let agent_item_for_tray = agent_status.clone();
-            let gateway_item_for_tray = gateway_status.clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    let (agent_running, gateway_running) = {
-                        let mut guard = state_for_tray.lock().expect("state");
-                        let agent = refresh_child(&mut guard.agent);
-                        let gateway = refresh_child(&mut guard.gateway);
-                        (agent, gateway)
-                    };
-
-                    let agent_text = if agent_running { "Working: Running" } else { "Working: Stopped" };
-                    let gateway_text = if gateway_running { "Routing: Connected" } else { "Routing: Disconnected" };
-
-                    if let Some(tray) = handle_for_tray.tray_by_id("main") {
-                        if let Some(menu) = tray.menu() {
-                            if let Some(item) = menu.get("agent_status") {
-                                if let tauri::menu::MenuItemKind::MenuItem(mi) = item {
-                                    let _ = mi.set_text(agent_text);
-                                }
-                            }
-                            if let Some(item) = menu.get("gateway_status") {
-                                if let tauri::menu::MenuItemKind::MenuItem(mi) = item {
-                                    let _ = mi.set_text(gateway_text);
-                                }
-                            }
-                        }
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-            });
 
             if config_path().exists() {
                 let _ = start_process_inner("agent", &state, &handle);
@@ -1708,6 +1702,7 @@ fn main() {
             stop_process,
             send_agent_message,
             cancel_subagent,
+            cancel_all_subagents,
             stop_generation,
             get_subagent_registry,
             clear_subagent_registry,

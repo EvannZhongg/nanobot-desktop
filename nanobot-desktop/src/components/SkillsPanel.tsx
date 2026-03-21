@@ -9,9 +9,10 @@ import type { SkillItem, SkillFile } from "../types";
 
 type Props = {
   toast: { success: (m: string) => void; error: (m: string) => void };
+  pinnedDirectory?: string | null;
 };
 
-export default function SkillsPanel({ toast }: Props) {
+export default function SkillsPanel({ toast, pinnedDirectory }: Props) {
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -33,7 +34,7 @@ export default function SkillsPanel({ toast }: Props) {
     setLoading(true);
     setError("");
     try {
-      const items = await invoke<SkillItem[]>("list_workspace_skills");
+      const items = await invoke<SkillItem[]>("list_workspace_skills", { path: pinnedDirectory });
       setSkills(items);
     } catch (err) {
       setError(String(err));
@@ -41,7 +42,7 @@ export default function SkillsPanel({ toast }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [toast, pinnedDirectory]);
 
   useEffect(() => { loadSkills(); }, [loadSkills]);
 

@@ -14,10 +14,11 @@ type Props = {
   };
   subagentStatuses: Record<string, AgentStatusEvent>;
   onCancelSubagent: (id: string) => void;
+  onCancelAllSubagents: () => void;
   onRefreshSubagents: () => void;
 };
 
-export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent, onRefreshSubagents }: Props) {
+export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent, onCancelAllSubagents, onRefreshSubagents }: Props) {
   const agentLogRef = useRef<HTMLDivElement | null>(null);
   const gatewayLogRef = useRef<HTMLDivElement | null>(null);
 
@@ -38,27 +39,41 @@ export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent,
     }
   };
 
+  const [agentFilter, setAgentFilter] = React.useState<string[]>(["INFO", "WARN", "ERROR"]);
+  const [gatewayFilter, setGatewayFilter] = React.useState<string[]>(["INFO", "WARN", "ERROR"]);
+  const [agentAutoScroll, setAgentAutoScroll] = React.useState(true);
+  const [gatewayAutoScroll, setGatewayAutoScroll] = React.useState(true);
+
+  const filterLogs = (logs: { stream: string; line: string }[], filter: string[]) => {
+    const cleaned = logs.map(l => cleanLogLine(l.line));
+    return cleaned.filter(line => {
+      if (filter.length === 0) return true;
+      return filter.some(f => line.includes(`| ${f} |`) || line.startsWith(`${f}:`) || line.includes(` ${f} `));
+    }).slice(-500); 
+  };
+
   const agentLogText = useMemo(
-    () => proc.logs.agent.map((l) => `[${l.stream}] ${cleanLogLine(l.line)}`).join("\n"),
-    [proc.logs.agent],
+    () => filterLogs(proc.logs.agent, agentFilter).join("\n"),
+    [proc.logs.agent, agentFilter],
   );
 
   const gatewayLogText = useMemo(
-    () => proc.logs.gateway.map((l) => `[${l.stream}] ${cleanLogLine(l.line)}`).join("\n"),
-    [proc.logs.gateway],
+    () => filterLogs(proc.logs.gateway, gatewayFilter).join("\n"),
+    [proc.logs.gateway, gatewayFilter],
   );
 
   // Auto-scroll logs
   useEffect(() => {
-    const scroll = (ref: React.RefObject<HTMLDivElement>) => {
-      const node = ref.current;
-      if (node) node.scrollTop = node.scrollHeight;
-    };
-    requestAnimationFrame(() => {
-      scroll(agentLogRef);
-      scroll(gatewayLogRef);
-    });
-  }, [agentLogText, gatewayLogText]);
+    if (agentAutoScroll && agentLogRef.current) {
+      agentLogRef.current.scrollTop = agentLogRef.current.scrollHeight;
+    }
+  }, [agentLogText, agentAutoScroll]);
+
+  useEffect(() => {
+    if (gatewayAutoScroll && gatewayLogRef.current) {
+      gatewayLogRef.current.scrollTop = gatewayLogRef.current.scrollHeight;
+    }
+  }, [gatewayLogText, gatewayAutoScroll]);
 
   // Enable streaming when mounted, disable on unmount
   useEffect(() => {
@@ -70,19 +85,19 @@ export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent,
   }, []);
 
   const renderSubagentCard = (s: AgentStatusEvent) => (
-    <div key={s.agent_id} className={`subagent-card animate-fade-in ${s.status}`}>
+    <div key={s.agentId} className={`subagent-card animate-fade-in ${s.status}`}>
       <div className="subagent-card-header">
         <div className="subagent-title-info">
-          <span className="subagent-id">ID: {s.agent_id.slice(0, 8)}...</span>
+          <span className="subagent-id">ID: {s.agentId.slice(0, 8)}...</span>
           <span className="subagent-time">
             <Clock size={10} />
-            {s.last_update ? new Date(s.last_update).toLocaleTimeString() : "--:--"}
+            {s.lastUpdate ? new Date(s.lastUpdate).toLocaleTimeString() : "--:--"}
           </span>
         </div>
         {s.status !== "completed" && s.status !== "error" && (
           <button 
             className="cancel-btn-small" 
-            onClick={() => onCancelSubagent(s.agent_id)}
+            onClick={() => onCancelSubagent(s.agentId)}
             title="Stop Subagent"
           >
             <XCircle size={14} />
@@ -94,20 +109,20 @@ export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent,
         <div className={`status-badge ${s.status}`}>{s.status}</div>
         <div className="subagent-msg">{s.message || "Working..."}</div>
         
-        {s.tool_history && s.tool_history.length > 0 && (
+        {s.toolHistory && s.toolHistory.length > 0 && (
           <div className="execution-history">
             <div className="history-label">Execution steps:</div>
             <div className="history-steps">
-              {s.tool_history.map((tool, idx) => (
+              {s.toolHistory.map((tool: ToolExecution, idx: number) => (
                 <div key={idx} className="history-step" title={JSON.stringify(tool.args)}>
                   <ChevronRight size={12} className="step-arrow" />
                   <span className="step-name">{tool.name}</span>
                 </div>
               ))}
-              {s.status === "tool_call" && s.tool_name && !s.tool_history.some(t => t.name === s.tool_name) && (
+              {s.status === "tool_call" && s.toolName && !s.toolHistory.some((t: ToolExecution) => t.name === s.toolName) && (
                 <div className="history-step active">
                   <ChevronRight size={12} className="step-arrow" />
-                  <span className="step-name">{s.tool_name}</span>
+                  <span className="step-name">{s.toolName}</span>
                   <span className="step-pulse" />
                 </div>
               )}
@@ -159,12 +174,20 @@ export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent,
             <Brain size={20} className="icon-purple" />
             <h3>Active Subagents ({activeSubagents.length})</h3>
           </div>
-          {completedSubagents.length > 0 && (
-            <button className="clear-btn-small" onClick={handleClearRegistry} title="Clear Handled">
-              <Trash size={14} />
-              Clear Hist
-            </button>
-          )}
+          <div className="header-actions">
+            {activeSubagents.length > 0 && (
+              <button className="stop-all-btn" onClick={onCancelAllSubagents} title="Stop All Active">
+                <XCircle size={14} />
+                Stop All
+              </button>
+            )}
+            {completedSubagents.length > 0 && (
+              <button className="clear-btn-small" onClick={handleClearRegistry} title="Clear Handled">
+                <Trash size={14} />
+                Clear Hist
+              </button>
+            )}
+          </div>
         </div>
         <div className="subagent-grid">
           {activeSubagents.length === 0 && completedSubagents.length === 0 ? (
@@ -180,15 +203,55 @@ export default function MonitorPanel({ proc, subagentStatuses, onCancelSubagent,
 
       <div className="monitor-logs">
         <div className="card">
-          <h3>Agent Logs</h3>
+          <div className="card-row">
+            <h3>Agent Logs</h3>
+            <div className="filter-actions">
+              <button 
+                className={`filter-btn ${agentAutoScroll ? "active" : ""}`}
+                onClick={() => setAgentAutoScroll(!agentAutoScroll)}
+                title="Toggle Auto-scroll"
+              >
+                Auto-scroll
+              </button>
+              {["DEBUG", "INFO", "WARN", "ERROR"].map(lv => (
+                <button 
+                  key={lv}
+                  className={`filter-btn ${agentFilter.includes(lv) ? "active" : ""}`}
+                  onClick={() => setAgentFilter(prev => prev.includes(lv) ? prev.filter(f => f !== lv) : [...prev, lv])}
+                >
+                  {lv}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="log-pane" ref={agentLogRef}>
-            <pre>{agentLogText || "No logs yet."}</pre>
+            <pre>{agentLogText || "No logs yet (check filters)."}</pre>
           </div>
         </div>
         <div className="card">
-          <h3>Gateway Logs</h3>
+          <div className="card-row">
+            <h3>Gateway Logs</h3>
+            <div className="filter-actions">
+              <button 
+                className={`filter-btn ${gatewayAutoScroll ? "active" : ""}`}
+                onClick={() => setGatewayAutoScroll(!gatewayAutoScroll)}
+                title="Toggle Auto-scroll"
+              >
+                Auto-scroll
+              </button>
+              {["DEBUG", "INFO", "WARN", "ERROR"].map(lv => (
+                <button 
+                  key={lv}
+                  className={`filter-btn ${gatewayFilter.includes(lv) ? "active" : ""}`}
+                  onClick={() => setGatewayFilter(prev => prev.includes(lv) ? prev.filter(f => f !== lv) : [...prev, lv])}
+                >
+                  {lv}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="log-pane" ref={gatewayLogRef}>
-            <pre>{gatewayLogText || "No logs yet."}</pre>
+            <pre>{gatewayLogText || "No logs yet (check filters)."}</pre>
           </div>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Cpu, Plus, Settings, Trash, ChevronDown, Globe, Smartphone, Code, CheckCircle, AlertCircle } from "lucide-react";
 import type { ConfigFilePayload, Status } from "../types";
 import { PROVIDER_REGISTRY } from "../utils/providerRegistry";
@@ -40,6 +41,7 @@ export default function ModelPanel({ toast, proc }: Props) {
   const [deviceAuth, setDeviceAuth] = useState<any>(null);
   const [manualLink, setManualLink] = useState<string | null>(null);
   const pollingRef = useRef<boolean>(false);
+  const oauthListenerRef = useRef<any>(null);
 
   const loadConfig = useCallback(async () => {
     setLoading(true);
@@ -64,7 +66,31 @@ export default function ModelPanel({ toast, proc }: Props) {
     }
   }, [proc, toast]);
 
-  useEffect(() => { loadConfig(); }, [loadConfig]);
+  useEffect(() => {
+    loadConfig();
+    
+    let unlisten: any = null;
+    const setupListener = async () => {
+      unlisten = await listen("oauth-event", (event: any) => {
+        const payload = event.payload;
+        if (payload.type === "success") {
+          setEditKey(payload.token.access);
+          setDeviceAuth(null);
+          setOauthLoading(false);
+          toast.success(`Authorized ${payload.provider} successfully!`);
+        } else if (payload.type === "error") {
+          toast.error(`${payload.provider} auth failed: ${payload.message}`);
+          setOauthLoading(false);
+          setDeviceAuth(null);
+        } else if (payload.type === "status") {
+          toast.info(payload.message);
+        }
+      });
+    };
+    setupListener();
+
+    return () => { if (unlisten) unlisten(); };
+  }, [loadConfig]);
 
   const saveConfigStruct = useCallback(async (newObj: any) => {
     if (saving) return;
@@ -241,60 +267,16 @@ export default function ModelPanel({ toast, proc }: Props) {
     try {
       setOauthLoading(true);
       setDeviceAuth(null);
-      pollingRef.current = true;
       toast.info("Requesting device code...");
       const payload: any = await invoke("start_device_oauth", { provider: editType, region: "global" });
       setDeviceAuth(payload);
-      pollDevice(payload);
+      // Rust backend will now handle polling and emit events.
     } catch (e) {
       toast.error(`Device auth failed: ${e}`);
       setOauthLoading(false);
-      pollingRef.current = false;
     }
   };
 
-  const pollDevice = async (payload: any) => {
-    let interval = payload.interval * 1000;
-    const expiresAt = Date.now() + (payload.expires_in * 1000);
-    
-    while(Date.now() < expiresAt && modalOpen && pollingRef.current) {
-      try {
-        const result: any = await invoke("poll_device_oauth", { 
-          provider: editType, 
-          deviceCode: payload.device_code, 
-          verifier: payload.verifier,
-          region: "global"
-        });
-        
-        if (!pollingRef.current) break;
-
-        if (result.status === "success" || result.Success) {
-          const token = result.token || result.Success.token;
-          setEditKey(token.access);
-          setDeviceAuth(null);
-          pollingRef.current = false;
-          toast.success("Login successful!");
-          break;
-        } else if (result.status === "error" || result.Error) {
-          const msg = result.message || (result.Error && result.Error.message) || "Unknown error";
-          toast.error(`Polling error: ${msg}`);
-          pollingRef.current = false;
-          break;
-        } else {
-          const slowDown = result.slow_down || (result.Pending && result.Pending.slow_down);
-          if (slowDown) {
-             interval = Math.min(interval * 1.5, 10000);
-             toast.info("Polling too fast, slowing down...");
-          }
-        }
-      } catch (e) {
-        toast.error(`Network error: ${e}`);
-        break;
-      }
-      await new Promise(r => setTimeout(r, interval));
-    }
-    setOauthLoading(false);
-  };
 
   const allAvailableModels = useMemo(() => {
     const models = new Set<string>();
