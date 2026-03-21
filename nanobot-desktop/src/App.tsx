@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo
 import { 
   Brain, Plus, RefreshCw, Type, Minus, Plus as PlusIcon, ArrowUp, MessageSquare, 
   XCircle, FilePlus, UploadCloud, FileText, Image as ImageIcon, Square,
-  Check, Copy, Activity, Settings2, Router, Users, ChevronDown
+  Check, Copy, Activity, Settings2, Router, Users, ChevronDown, FolderOpen
 } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
@@ -502,6 +502,21 @@ export default function App() {
                       )}
                     </div>
                     <div className="input-row-container">
+                      {chat.activeTrigger && (
+                        <div className="active-trigger-box">
+                          <div className="trigger-badge">
+                            {chat.activeTrigger === "@" ? (
+                              <Users size={14} className="trigger-icon" />
+                            ) : (
+                              <FolderOpen size={14} className="trigger-icon" />
+                            )}
+                            <span className="trigger-label">
+                              {chat.activeTrigger === "@" ? "Select Agent / Skill" : 
+                               chat.activeTrigger === "!!" ? "Pin Directory Scope" : "Select File / Directory"}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                       {chat.pinnedDirectory && (
                         <div className="pinned-scope">
                           <div className="scope-tag">

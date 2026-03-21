@@ -27,6 +27,7 @@ export function useChat(sessions: SessionInfo[]) {
   const [collapsedMsgIds, setCollapsedMsgIds] = useState<Set<string>>(new Set());
   const [lastSelectedFolder, setLastSelectedFolder] = useState<string | null>(null);
   const [pinnedDirectory, setPinnedDirectory] = useState<string | null>(null);
+  const [activeTrigger, setActiveTrigger] = useState<string | null>(null);
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
@@ -38,16 +39,17 @@ export function useChat(sessions: SessionInfo[]) {
 
   // Stable refs for event handlers to avoid recreation on keystrokes
   const stateRef = useRef({ input, currentSession, selectedModel, attachments });
+  const sessRef = useRef(currentSession); // Added for session check during history load
+
   useEffect(() => {
     stateRef.current = { input, currentSession, selectedModel, attachments };
+    sessRef.current = currentSession;
   }, [input, currentSession, selectedModel, attachments]);
 
   // Persist font size
   useEffect(() => {
     localStorage.setItem("nanobot-chat-font-size", String(chatFontSize));
   }, [chatFontSize]);
-
-  // Sync with Rust-side persistent registry on mount
 
   // Sync with Rust-side persistent registry on mount
   useEffect(() => {
@@ -68,8 +70,6 @@ export function useChat(sessions: SessionInfo[]) {
           const payload = event.payload;
           const existing = prev[payload.agentId];
           
-          // If it's a tool_call, we might want to preserve history 
-          // if the event itself doesn't contain it (Rust backend sends history too now)
           return {
             ...prev,
             [payload.agentId]: {
@@ -135,6 +135,10 @@ export function useChat(sessions: SessionInfo[]) {
         offset: historyOffset,
         name: sessionFileName
       });
+
+      // Check if session changed while loading
+      if (currentSession !== sessRef.current) return 0;
+
       const mapped = data
         .map((msg, idx) => mapHistoryMessage(msg, idx + historyOffset))
         .filter((m) => m.content.trim().length > 0);
@@ -246,7 +250,7 @@ export function useChat(sessions: SessionInfo[]) {
   const switchSession = useCallback((name: string) => {
     setCurrentSession(name);
     setMessages([]);
-    setAttachments([]); // Round 8: Clear state on switch
+    setAttachments([]);
     setHistoryOffset(0);
     setHistoryEnd(false);
   }, []);
@@ -254,19 +258,26 @@ export function useChat(sessions: SessionInfo[]) {
   const triggerLock = useRef(false);
 
   const handleInputChange = useCallback(async (newText: string) => {
-    const prevText = input;
     setInput(newText);
 
-    // Check for trigger patterns
     if (triggerLock.current) return;
     
-    // Only trigger if we are at the end of the text (or adding a char)
-    // and the last character is exactly ! or @ preceded by whitespace/start
-    // Check for trigger patterns: ! (directory/file), !! (pinned directory), @ (agent/skill)
-    const match = newText.match(/(?:^|\s)(!{1,2}|@)$/);
-    if (!match) return;
+    const match = newText.match(/(?:^|\s)(!{1,3}|@)$/);
+    if (!match) {
+      if (activeTrigger) setActiveTrigger(null);
+      return;
+    }
 
     const trigger = match[1];
+    
+    if (trigger === "!!!") {
+      setPinnedDirectory(null);
+      setInput(newText.slice(0, -3).trimEnd());
+      setActiveTrigger(null);
+      return;
+    }
+
+    setActiveTrigger(trigger);
     const isPinTrigger = trigger === "!!";
     const isDirTrigger = trigger === "!" || isPinTrigger;
     
@@ -275,8 +286,6 @@ export function useChat(sessions: SessionInfo[]) {
       const selected = await open({
         directory: isDirTrigger,
         multiple: false,
-        // If it's a pin trigger, we pick a new directory. 
-        // If it's a normal trigger and we have a pin, start there.
         defaultPath: isPinTrigger ? (lastSelectedFolder ?? undefined) : (pinnedDirectory ?? lastSelectedFolder ?? undefined)
       });
       
@@ -289,11 +298,7 @@ export function useChat(sessions: SessionInfo[]) {
         }
 
         setInput(current => {
-          // Double check the trigger still exists at the end
           if (current.endsWith(trigger)) {
-            // For pin trigger, we just remove the !! and don't necessarily insert the path if it's meant to be a state change 
-            // BUT the user said "triggers after !!", so maybe we should insert the path too or just acknowledge.
-            // Let's insert the path as a confirmation.
             return current.slice(0, -trigger.length).trimEnd() + " " + selected + " ";
           }
           return current;
@@ -303,8 +308,9 @@ export function useChat(sessions: SessionInfo[]) {
       console.error("Trigger fail", err);
     } finally {
       setTimeout(() => { triggerLock.current = false; }, 500);
+      setActiveTrigger(null);
     }
-  }, [input, lastSelectedFolder, pinnedDirectory]);
+  }, [lastSelectedFolder, pinnedDirectory, currentSession]); 
 
   const cancelSubagent = useCallback(async (agentId: string) => {
     try {
@@ -333,7 +339,7 @@ export function useChat(sessions: SessionInfo[]) {
   }, [reloadSubagents]);
 
   const stopGeneration = useCallback(async () => {
-    setSending(false); // Immediate UI feedback
+    setSending(false);
     try {
       await invoke("stop_generation");
     } catch (err) {
@@ -356,6 +362,7 @@ export function useChat(sessions: SessionInfo[]) {
     sendMessage, handleInputKeyDown,
     attachments, addAttachment, removeAttachment,
     pinnedDirectory, setPinnedDirectory,
+    activeTrigger,
     subagentStatuses, cancelSubagent, cancelAllSubagents, stopGeneration,
     reloadSubagents,
   };

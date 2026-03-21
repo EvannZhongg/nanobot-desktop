@@ -910,6 +910,53 @@ body {
 }
 
 /* -- Pinned Scope Indicator (Phase 5) -- */
+.active-trigger-box {
+  position: absolute;
+  top: -42px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 150;
+  animation: trigger-slide-up 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  pointer-events: none;
+}
+
+@keyframes trigger-slide-up {
+  from { opacity: 0; transform: translate(-50%, 12px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.trigger-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: hsla(var(--h), 20%, 15%, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid hsla(var(--h), 30%, 50%, 0.3);
+  border-radius: 9999px;
+  box-shadow: 0 12px 30px -5px rgba(0, 0, 0, 0.4);
+}
+
+.trigger-icon {
+  color: var(--accent);
+  animation: trigger-pulse 2s infinite ease-in-out;
+}
+
+@keyframes trigger-pulse {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 0px var(--accent)); }
+  50% { transform: scale(1.1); filter: drop-shadow(0 0 4px var(--accent)); }
+}
+
+.trigger-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .pinned-scope {
   padding: 8px 12px 4px;
   display: flex;
