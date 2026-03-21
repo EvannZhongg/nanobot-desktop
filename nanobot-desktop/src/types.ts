@@ -2,7 +2,7 @@
  * Shared type definitions for Nanobot Desktop.
  */
 
-export type TabKey = "chat" | "monitor" | "cron" | "sessions" | "skills" | "memory" | "models";
+export type TabKey = "chat" | "monitor" | "cron" | "sessions" | "skills" | "memory" | "models" | "settings";
 
 export type Message = {
   id: string;

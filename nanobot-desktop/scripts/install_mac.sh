@@ -7,11 +7,12 @@ echo "🚀 [1/4] Pulling latest code from Git..."
 git pull origin main || echo "⚠️ Git pull failed or skipped (you might have uncommitted changes)."
 
 echo "📦 [2/4] Installing dependencies..."
-npm install
-cd src-tauri && cargo fetch && cd ..
+npm install --prefer-offline --no-fund --no-audit
 
 echo "🔨 [3/4] Building production release..."
-npm run tauri build
+export CARGO_PROFILE_RELEASE_LTO="false"
+export CARGO_PROFILE_RELEASE_OPT_LEVEL="2"
+npm run tauri build -- --bundles app
 
 echo "💻 [4/4] Installing application to /Applications..."
 APP_SOURCE="src-tauri/target/release/bundle/macos/Nanobot Desktop.app"
