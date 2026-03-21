@@ -93,17 +93,21 @@ def prepare_python_runtime(target: Path) -> Path:
             ignored.append("tests")
         if "test" in entries:
             ignored.append("test")
+        if "pkgs" in entries:
+            ignored.append("pkgs")
+        if "envs" in entries:
+            ignored.append("envs")
         return ignored
 
-    shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore)
+    shutil.copytree(source, target, dirs_exist_ok=True, ignore=ignore, symlinks=True)
     return target
 
 
-def install_dependencies(site_packages: Path) -> None:
+def install_dependencies(site_packages: Path, python_exe: Path) -> None:
     site_packages.mkdir(parents=True, exist_ok=True)
-    ensure_pip_available()
+    ensure_pip_available(python_exe)
     cmd = [
-        sys.executable,
+        str(python_exe),
         "-m",
         "pip",
         "install",
@@ -121,10 +125,10 @@ def install_dependencies(site_packages: Path) -> None:
         shutil.copytree(bridge_src, bridge_dst)
 
 
-def ensure_pip_available() -> None:
+def ensure_pip_available(python_exe: Path) -> None:
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "--version"],
+            [str(python_exe), "-m", "pip", "--version"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -134,7 +138,7 @@ def ensure_pip_available() -> None:
 
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "ensurepip", "--upgrade"],
+            [str(python_exe), "-m", "ensurepip", "--upgrade"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -145,7 +149,7 @@ def ensure_pip_available() -> None:
         ) from exc
 
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "pip"],
+        [str(python_exe), "-m", "pip", "install", "--upgrade", "pip"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -162,9 +166,10 @@ def main() -> None:
 
     print(f"[1/3] Preparing embedded python -> {python_target}")
     prepare_python_runtime(python_target)
+    python_exe = find_python_executable(python_target)
 
     print(f"[2/3] Installing nanobot deps -> {site_packages}")
-    install_dependencies(site_packages)
+    install_dependencies(site_packages, python_exe)
 
     manifest = resources / "runtime_manifest.txt"
     manifest.write_text(

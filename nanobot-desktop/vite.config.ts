@@ -1,4 +1,4 @@
-﻿import { defineConfig } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
@@ -18,6 +18,14 @@ export default defineConfig({
   },
   build: {
     target: "es2020",
-    outDir: "dist"
+    outDir: "dist",
+    chunkSizeWarningLimit: 400,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-markdown": ["react-markdown", "remark-gfm"],
+        },
+      },
+    },
   }
 });

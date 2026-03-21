@@ -12,6 +12,8 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
+mod oauth;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -351,6 +353,13 @@ fn base_command(app: &AppHandle) -> Command {
     cmd.env("COLUMNS", "120");
     cmd.env("NO_COLOR", "1");
     cmd.env("RICH_DISABLE", "1");
+    // Forward proxy settings from system environment if set (never hardcode)
+    if let Some(proxy) = std::env::var_os("HTTP_PROXY").or_else(|| std::env::var_os("http_proxy")) {
+        cmd.env("HTTP_PROXY", &proxy);
+    }
+    if let Some(proxy) = std::env::var_os("HTTPS_PROXY").or_else(|| std::env::var_os("https_proxy")) {
+        cmd.env("HTTPS_PROXY", &proxy);
+    }
     if use_embedded {
         if let Some(pyhome) = embedded_python_root(app) {
             let normalized = normalize_path(&pyhome);
@@ -1232,6 +1241,7 @@ async fn send_agent_message(
     app: AppHandle,
     message: String,
     session_id: String,
+    model: Option<String>,
 ) -> Result<String, String> {
     emit_log(
         &app,
@@ -1242,15 +1252,20 @@ async fn send_agent_message(
     let app_handle = app.clone();
     let combined = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let mut cmd = base_command(&app_handle);
-        cmd.args([
-            "-m",
-            "nanobot",
-            "agent",
-            "--message",
-            &message,
-            "--session",
-            &session_id,
-        ])
+        let mut cli_args = vec![
+            "-m".to_string(),
+            "nanobot".to_string(),
+            "agent".to_string(),
+            "--message".to_string(),
+            message,
+            "--session".to_string(),
+            session_id,
+        ];
+        if let Some(m) = model {
+            cli_args.push("--model".to_string());
+            cli_args.push(m);
+        }
+        cmd.args(cli_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -1302,8 +1317,14 @@ fn main() {
     let state = Arc::new(Mutex::new(ProcState::default()));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Ok(app_menu) = Menu::default(app.handle()) {
+                let _ = app.set_menu(app_menu);
+            }
+
             if let Some(window) = app.get_webview_window("main") {
                 let icon_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("icons")
@@ -1410,7 +1431,10 @@ fn main() {
             delete_cron_job,
             start_process,
             stop_process,
-            send_agent_message
+            send_agent_message,
+            oauth::start_browser_oauth,
+            oauth::start_device_oauth,
+            oauth::poll_device_oauth
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
