@@ -118,3 +118,14 @@ export type SessionInfo = {
   size?: number;
   modified?: number;
 };
+
+export type AgentStatusEvent = {
+  agent_id: string;
+  chat_id: string;
+  status: "thinking" | "tool_call" | "progress" | "completed" | "error";
+  message?: string;
+  tool_name?: string;
+  tool_args?: any;
+  timestamp?: string;
+  metadata?: Record<string, any>;
+};

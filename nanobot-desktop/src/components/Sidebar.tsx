@@ -3,6 +3,11 @@
  * Displays brand, tab navigation buttons, and status footer.
  */
 import React, { memo } from "react";
+import { 
+  MessageSquare, Monitor, Calendar, History, 
+  Zap, Brain, Cpu, Settings, Plus, Activity, 
+  Settings2 
+} from "lucide-react";
 import type { TabKey, Status } from "../types";
 import { useSettings } from "../hooks/useSettings";
 
@@ -11,74 +16,80 @@ type Props = {
   setTab: (t: TabKey) => void;
   status: Status;
   currentSession: string;
+  onNewChat?: () => void;
 };
 
-const NAV_ITEMS: { key: TabKey; label: string }[] = [
-  { key: "chat", label: "Chat" },
-  { key: "monitor", label: "Monitor" },
-  { key: "cron", label: "Cron" },
-  { key: "sessions", label: "Sessions" },
-  { key: "skills", label: "Skills" },
-  { key: "memory", label: "Memory" },
-  { key: "models", label: "Models" },
+const NAV_ITEMS: { key: TabKey; label: string; icon: any }[] = [
+  { key: "chat", label: "Chat", icon: MessageSquare },
+  { key: "monitor", label: "Monitor", icon: Monitor },
+  { key: "cron", label: "Cron", icon: Calendar },
+  { key: "sessions", label: "Sessions", icon: History },
+  { key: "skills", label: "Skills", icon: Zap },
+  { key: "memory", label: "Memory", icon: Brain },
+  { key: "models", label: "Models", icon: Cpu },
 ];
 
-export default memo(function Sidebar({ tab, setTab, status, currentSession }: Props) {
+export default memo(function Sidebar({ tab, setTab, status, currentSession, onNewChat }: Props) {
   const { t } = useSettings();
 
   return (
     <aside className="sidebar">
-      <div className="brand">
-        Nanobot Desktop
+      <div className="sidebar-brand-container">
+        <div className="brand">
+          <span className="logo">🤖</span>
+          <span>Nanobot</span>
+        </div>
+        <button 
+          className="new-chat-btn" 
+          onClick={onNewChat}
+          title="New Chat (Cmd+N)"
+        >
+          <Plus size={18} />
+          <span>New Chat</span>
+        </button>
       </div>
+
       <nav className="nav" role="tablist" aria-label="Main Navigation">
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.key}
-            className={tab === item.key ? "active" : ""}
-            onClick={() => setTab(item.key)}
-            role="tab"
-            aria-selected={tab === item.key}
-            aria-controls={`panel-${item.key}`}
-            title={t(`nav.${item.key}` as any)}
-          >
-            {t(`nav.${item.key}` as any)}
-          </button>
-        ))}
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.key}
+              className={tab === item.key ? "active" : ""}
+              onClick={() => setTab(item.key)}
+              role="tab"
+              aria-selected={tab === item.key}
+              aria-controls={`panel-${item.key}`}
+              title={t(`nav.${item.key}` as any)}
+            >
+              <Icon size={18} strokeWidth={tab === item.key ? 2.5 : 2} />
+              <span>{t(`nav.${item.key}` as any)}</span>
+            </button>
+          );
+        })}
       </nav>
+
       <div className="sidebar-footer">
-        <div className="status-row">
-          <span className="status-text">
-            {t("status.agent")}
-            <span
-              className={`breath-dot agent ${status.agent ? "on" : "off"}`}
-              title={`Agent ${status.agent ? "running" : "stopped"}`}
-            />
-            <span className="status-text-label">
-              {status.agent ? t("status.running") : t("status.stopped")}
-            </span>
-          </span>
+        <div className="status-group">
+          <div className="status-row">
+            <Activity size={14} className={status.agent ? "text-success" : "text-muted"} />
+            <span className="status-label">Agent</span>
+            <span className={`status-dot ${status.agent ? "on" : "off"}`} />
+          </div>
+          <div className="status-row">
+            <Settings2 size={14} className={status.gateway ? "text-accent" : "text-muted"} />
+            <span className="status-label">Gateway</span>
+            <span className={`status-dot ${status.gateway ? "on" : "off"}`} />
+          </div>
         </div>
-        <div className="status-row">
-          <span className="status-text">
-            {t("status.gateway")}
-            <span
-              className={`breath-dot gateway ${status.gateway ? "on" : "off"}`}
-              title={`Gateway ${status.gateway ? "running" : "stopped"}`}
-            />
-            <span className="status-text-label">
-              {status.gateway ? t("status.running") : t("status.stopped")}
-            </span>
-          </span>
-        </div>
-        <div className="status-row session-row" style={{ marginTop: "8px" }}>
-          <button 
-            className={`settings-btn ${tab === "settings" ? "active" : ""}`}
-            onClick={() => setTab("settings")}
-          >
-            <span className="settings-icon">⚙️</span> {t("nav.settings")}
-          </button>
-        </div>
+
+        <button 
+          className={`settings-tab-btn ${tab === "settings" ? "active" : ""}`}
+          onClick={() => setTab("settings")}
+        >
+          <Settings size={18} />
+          <span>{t("nav.settings")}</span>
+        </button>
       </div>
     </aside>
   );

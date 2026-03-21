@@ -5,7 +5,12 @@
 import React, { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Message } from "../types";
+import { 
+  Copy, ChevronDown, ChevronUp, Terminal, 
+  Cpu, Beaker, CheckCircle2, AlertCircle,
+  Loader2, XCircle
+} from "lucide-react";
+import type { Message, AgentStatusEvent } from "../types";
 import { cleanLogBlock, splitDebugContent } from "../utils/logUtils";
 
 type Props = {
@@ -13,9 +18,11 @@ type Props = {
   chatFontSize: number;
   isCollapsed: boolean;
   toggleCollapse: (id: string) => void;
+  subagentStatuses?: Record<string, AgentStatusEvent>;
+  onCancelSubagent?: (agentId: string) => void;
 };
 
-const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse }: Props) => {
+const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse, subagentStatuses, onCancelSubagent }: Props) => {
   const parsed = useMemo(
     () => msg.role === "bot" ? splitDebugContent(msg.content) : null,
     [msg.content, msg.role]
@@ -23,7 +30,6 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse }
 
   const handleCopy = React.useCallback(() => {
     navigator.clipboard.writeText(msg.content).catch(() => {
-      // fallback: select and copy (can be implemented via temp textarea)
       const textArea = document.createElement("textarea");
       textArea.value = msg.content;
       document.body.appendChild(textArea);
@@ -33,69 +39,129 @@ const ChatMessageItem = memo(({ msg, chatFontSize, isCollapsed, toggleCollapse }
     });
   }, [msg.content]);
 
+  const roleLabel = msg.role === "user" ? "You" : "Assistant";
+
   return (
-    <div className={`message-row ${msg.role === "user" ? "user" : "bot"}`}>
-      <div className={`bubble ${msg.role === "user" ? "user" : "bot"}`}>
-        <div className="bubble-body" style={{ fontSize: `${chatFontSize}px` }}>
-          {isCollapsed ? (
-            <div className="collapsed-indicator">*(Content Collapsed)*</div>
-          ) : (
-            <>
-              {msg.attachments && msg.attachments.length > 0 && (
-                <div className="message-attachments">
-                  {msg.attachments.map((at) => (
-                    <div key={at.id} className="message-attachment-item">
-                      {at.previewUrl ? (
-                        <img src={at.previewUrl} alt={at.name} className="message-attachment-img" />
-                      ) : (
-                        <div className="message-attachment-file">
-                          <span className="file-icon">{at.type.includes("pdf") ? "📄" : "📁"}</span>
-                          <span className="file-name">{at.name}</span>
+    <div className={`message-row ${msg.role === "user" ? "user" : "bot"} ${isCollapsed ? "collapsed" : ""}`}>
+      <div className="bubble-wrapper">
+        <div className={`bubble ${msg.role === "user" ? "user" : "bot"}`}>
+          <div className="bubble-body" style={{ fontSize: `${chatFontSize}px` }}>
+            {isCollapsed ? (
+              <div className="collapsed-indicator">*(Content Collapsed)*</div>
+            ) : (
+              <>
+                {msg.attachments && msg.attachments.length > 0 && (
+                  <div className="message-attachments">
+                    {msg.attachments.map((at) => (
+                      <div key={at.id} className="message-attachment-item">
+                        {at.previewUrl ? (
+                          <img src={at.previewUrl} alt={at.name} className="message-attachment-img" />
+                        ) : (
+                          <div className="message-attachment-file">
+                            <span className="file-icon">{at.type.includes("pdf") ? "📄" : "📁"}</span>
+                            <span className="file-name">{at.name}</span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {parsed ? (
+                  <>
+                    {parsed.main ? (
+                      <div className="markdown-body">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.main}</ReactMarkdown>
+                      </div>
+                    ) : null}
+                    
+                    <div className="debug-container">
+                      {/* Live Subagent Statuses */}
+                      {subagentStatuses && Object.entries(subagentStatuses).length > 0 && (
+                        <div className="live-status-container">
+                          {Object.entries(subagentStatuses).map(([agentId, status]) => {
+                            // Only show if not completed or error, OR if it's very recent
+                            const isActive = status.status !== "completed" && status.status !== "error";
+                            if (!isActive) return null;
+
+                            return (
+                              <div key={agentId} className="live-status-item">
+                                <div className="status-header">
+                                  <div className="status-title">
+                                    <Loader2 className="spinner" size={14} />
+                                    <span>Subagent: {agentId.slice(0, 8)}</span>
+                                  </div>
+                                  <button 
+                                    className="cancel-btn"
+                                    onClick={() => onCancelSubagent?.(agentId)}
+                                    title="Cancel task"
+                                  >
+                                    <XCircle size={14} />
+                                  </button>
+                                </div>
+                                <div className="status-body">
+                                  <div className="status-badge">{status.status}</div>
+                                  <div className="status-text">{status.message || (status.tool_name ? `Using ${status.tool_name}...` : "Thinking...")}</div>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
+
+                      {parsed.tools && (
+                        <details className="debug-details tool">
+                          <summary>
+                            <Terminal size={14} />
+                            <span>Tools ({parsed.toolCount})</span>
+                            <ChevronDown className="chevron" size={14} />
+                          </summary>
+                          <pre>{cleanLogBlock(parsed.tools)}</pre>
+                        </details>
+                      )}
+                      {parsed.subagents && (
+                        <details className="debug-details agent">
+                          <summary>
+                            <Cpu size={14} />
+                            <span>Subagents ({parsed.subagentCount})</span>
+                            <ChevronDown className="chevron" size={14} />
+                          </summary>
+                          <pre>{cleanLogBlock(parsed.subagents)}</pre>
+                        </details>
+                      )}
+                      {parsed.debug && (
+                        <details className="debug-details log">
+                          <summary>
+                            <Beaker size={14} />
+                            <span>Debug Logs ({parsed.debugCount})</span>
+                            <ChevronDown className="chevron" size={14} />
+                          </summary>
+                          <pre>{cleanLogBlock(parsed.debug)}</pre>
+                        </details>
+                      )}
                     </div>
-                  ))}
-                </div>
-              )}
-              {parsed ? (
-                <>
-                  {parsed.main ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsed.main}</ReactMarkdown>
-                  ) : null}
-                  {parsed.tools ? (
-                    <details className="debug-details">
-                      <summary>调用工具（{parsed.toolCount}）</summary>
-                      <pre>{cleanLogBlock(parsed.tools)}</pre>
-                    </details>
-                  ) : null}
-                  {parsed.subagents ? (
-                    <details className="debug-details">
-                      <summary>子代理（{parsed.subagentCount}）</summary>
-                      <pre>{cleanLogBlock(parsed.subagents)}</pre>
-                    </details>
-                  ) : null}
-                  {parsed.debug ? (
-                    <details className="debug-details">
-                      <summary>调试日志（{parsed.debugCount}）</summary>
-                      <pre>{cleanLogBlock(parsed.debug)}</pre>
-                    </details>
-                  ) : null}
-                </>
-              ) : (
-                <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{msg.content}</div>
-              )}
-            </>
-          )}
+                  </>
+                ) : (
+                  <div className="plain-text-body">{msg.content}</div>
+                )}
+              </>
+            )}
+          </div>
         </div>
-      </div>
-      <div className="bubble-meta">
-        {msg.role} · {msg.createdAt}
-        <button className="collapse-btn" onClick={() => toggleCollapse(msg.id)} aria-expanded={!isCollapsed} aria-label={isCollapsed ? "Expand message" : "Collapse message"}>
-          {isCollapsed ? "展开 (Expand)" : "收起 (Collapse)"}
-        </button>
-        <button className="copy-btn" onClick={handleCopy} title="Copy message" aria-label="Copy message content">
-          📋
-        </button>
+
+        <div className="bubble-footer">
+          <div className="meta-left">
+            <span className="role-badge">{roleLabel}</span>
+            <span className="time-stamp">{msg.createdAt}</span>
+          </div>
+          <div className="meta-actions">
+            <button className="bubble-action-btn" onClick={() => toggleCollapse(msg.id)} title={isCollapsed ? "Expand" : "Collapse"}>
+              {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+            </button>
+            <button className="bubble-action-btn" onClick={handleCopy} title="Copy message">
+              <Copy size={14} />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

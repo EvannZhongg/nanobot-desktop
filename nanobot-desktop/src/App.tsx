@@ -1,4 +1,5 @@
 import React, { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Brain, Plus, RefreshCw, Type, Minus, Plus as PlusIcon } from "lucide-react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 import type {
@@ -284,7 +285,13 @@ export default function App() {
              }
            }}
       >
-        <Sidebar tab={tab} setTab={setTab} status={proc.status} currentSession={chat.currentSession} />
+        <Sidebar 
+          tab={tab} 
+          setTab={setTab} 
+          status={proc.status} 
+          currentSession={chat.currentSession} 
+          onNewChat={chat.handleNewChat}
+        />
 
         <main className="main">
           <div className="header">
@@ -335,10 +342,10 @@ export default function App() {
                     </div>
                     
                     <div className="header-actions">
-                      <button onClick={() => chat.setChatFontSize((s) => Math.max(10, s - 1))} className="clean-action-btn" title="Decrease Font">a</button>
-                      <button onClick={() => chat.setChatFontSize((s) => Math.min(24, s + 1))} className="clean-action-btn" title="Increase Font">A</button>
-                      <button onClick={chat.handleNewChat} className="clean-action-btn highlight" title="New Chat (Cmd+N)"><span>＋</span></button>
-                      <button onClick={chat.handleRefreshChat} className="clean-action-btn" title="Refresh Chat"><span>↻</span></button>
+                      <button onClick={() => chat.setChatFontSize((s) => Math.max(10, s - 1))} className="clean-action-btn" title="Decrease Font"><Minus size={14} /></button>
+                      <button onClick={() => chat.setChatFontSize((s) => Math.min(24, s + 1))} className="clean-action-btn" title="Increase Font"><Plus size={14} /></button>
+                      <button onClick={chat.handleNewChat} className="clean-action-btn highlight" title="New Chat (Cmd+N)"><Plus size={16} /></button>
+                      <button onClick={chat.handleRefreshChat} className="clean-action-btn" title="Refresh Chat"><RefreshCw size={14} /></button>
                     </div>
                   </div>
                 </div>
@@ -347,98 +354,108 @@ export default function App() {
           </div>
 
           <ErrorBoundary fallbackMessage={`${tab} panel error`}>
-            <Suspense fallback={<PanelFallback />}>
-              {tab === "chat" ? (
-                <div className="content">
-                  <div className="chat-list" ref={chat.chatListRef} onScroll={chat.handleHistoryScroll} aria-live="polite" aria-atomic="false">
-                    {chat.messages.length === 0 && (
-                      <div className="empty-state">
-                        <div className="empty-state-icon">💬</div>
-                        <div className="empty-state-text">Start by sending a message</div>
-                        <div className="empty-state-hint">Press Enter to send, Shift+Enter for new line</div>
-                      </div>
-                    )}
-                    {chat.messages.map((msg) => (
-                      <ChatMessageItem
-                        key={msg.id}
-                        msg={msg}
-                        chatFontSize={chat.chatFontSize}
-                        isCollapsed={chat.collapsedMsgIds.has(msg.id)}
-                        toggleCollapse={chat.toggleCollapse}
-                      />
-                    ))}
-                    {chat.sending && (
-                      <div className="message-row bot" aria-busy="true" aria-label="Bot is typing">
-                        <div className="bubble bot thinking">
-                          <div className="bubble-body">
-                            <span className="thinking-text">正在思考</span>
-                            <span className="thinking-dots"><span /><span /><span /></span>
+            <div className="tab-panel-container" key={tab}>
+              <Suspense fallback={<PanelFallback />}>
+                {tab === "chat" ? (
+                  <div className="content">
+                    <div className="chat-list" ref={chat.chatListRef} onScroll={chat.handleHistoryScroll} aria-live="polite" aria-atomic="false">
+                      {chat.messages.length === 0 && (
+                        <div className="empty-state">
+                          <div className="empty-state-icon">💬</div>
+                          <div className="empty-state-text">Start by sending a message</div>
+                          <div className="empty-state-hint">Press Enter to send, Shift+Enter for new line</div>
+                        </div>
+                      )}
+                      {chat.messages.map((msg) => (
+                        <ChatMessageItem
+                          key={msg.id}
+                          msg={msg}
+                          chatFontSize={chat.chatFontSize}
+                          isCollapsed={chat.collapsedMsgIds.has(msg.id)}
+                          toggleCollapse={chat.toggleCollapse}
+                        />
+                      ))}
+                      {chat.sending && (
+                        <div className="message-row bot" aria-busy="true" aria-label="Bot is typing">
+                          <div className="bubble-wrapper">
+                            <div className="bubble bot thinking">
+                              <div className="bubble-body">
+                                <Brain size={16} className="thinking-icon" />
+                                <span className="thinking-text">思考中</span>
+                                <span className="typing-cursor" />
+                              </div>
+                            </div>
+                            <div className="bubble-footer" style={{ opacity: 1 }}>
+                              <div className="meta-left">
+                                <span className="role-badge">Assistant</span>
+                                <span className="time-stamp">{now()}</span>
+                              </div>
+                            </div>
                           </div>
                         </div>
-                        <div className="bubble-meta">assistant · {now()}</div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="input-row-container">
-                    <AttachmentBar
-                      attachments={chat.attachments}
-                      onRemove={chat.removeAttachment}
-                    />
-                    <div className="input-row">
-                      <textarea
-                        ref={chat.textareaRef}
-                      rows={1}
-                      value={chat.input}
-                      onChange={(e) => chat.setInput(e.target.value)}
-                      onKeyDown={chat.handleInputKeyDown}
-                      onPaste={(e) => {
-                        const items = e.clipboardData?.items;
-                        if (!items) return;
-                        for (let i = 0; i < items.length; i++) {
-                          if (items[i].kind === "file") {
-                            const f = items[i].getAsFile();
-                            if (f) {
-                              e.preventDefault();
-                              handleFileAttachment(f);
+                      )}
+                    </div>
+                    <div className="input-row-container">
+                      <AttachmentBar
+                        attachments={chat.attachments}
+                        onRemove={chat.removeAttachment}
+                      />
+                      <div className="input-row">
+                        <textarea
+                          ref={chat.textareaRef}
+                          rows={1}
+                          value={chat.input}
+                          onChange={(e) => chat.setInput(e.target.value)}
+                          onKeyDown={chat.handleInputKeyDown}
+                          onPaste={(e) => {
+                            const items = e.clipboardData?.items;
+                            if (!items) return;
+                            for (let i = 0; i < items.length; i++) {
+                              if (items[i].kind === "file") {
+                                const f = items[i].getAsFile();
+                                if (f) {
+                                  e.preventDefault();
+                                  handleFileAttachment(f);
+                                }
+                              }
                             }
-                          }
-                        }
-                      }}
-                      placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
-                      aria-label="Chat message input"
-                    />
-                    <button 
-                      onClick={chat.sendMessage} 
-                      onMouseDown={(e) => e.preventDefault()}
-                      disabled={chat.sending} 
-                      aria-label="Send message"
-                    >
-                      {chat.sending ? "…" : "↑"}
-                    </button>
+                          }}
+                          placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
+                          aria-label="Chat message input"
+                        />
+                        <button 
+                          onClick={chat.sendMessage} 
+                          onMouseDown={(e) => e.preventDefault()}
+                          disabled={chat.sending} 
+                          aria-label="Send message"
+                        >
+                          {chat.sending ? "…" : "↑"}
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ) : tab === "monitor" ? (
-                <MonitorPanel proc={proc} />
-              ) : tab === "cron" ? (
-                <CronPanel toast={toast} proc={proc} />
-              ) : tab === "sessions" ? (
-                <SessionsPanel
-                  sessions={sessions}
-                  loadSessions={loadSessions}
-                  sessionsLoading={sessionsLoading}
-                  toast={toast}
-                />
-              ) : tab === "skills" ? (
-                <SkillsPanel toast={toast} />
-              ) : tab === "memory" ? (
-                <MemoryPanel toast={toast} />
-              ) : tab === "models" ? (
-                <ModelPanel toast={toast} proc={proc} />
-              ) : (
-                <SettingsPanel />
-              )}
-            </Suspense>
+                ) : tab === "monitor" ? (
+                  <MonitorPanel proc={proc} />
+                ) : tab === "cron" ? (
+                  <CronPanel toast={toast} proc={proc} />
+                ) : tab === "sessions" ? (
+                  <SessionsPanel
+                    sessions={sessions}
+                    loadSessions={loadSessions}
+                    sessionsLoading={sessionsLoading}
+                    toast={toast}
+                  />
+                ) : tab === "skills" ? (
+                  <SkillsPanel toast={toast} />
+                ) : tab === "memory" ? (
+                  <MemoryPanel toast={toast} />
+                ) : tab === "models" ? (
+                  <ModelPanel toast={toast} proc={proc} />
+                ) : (
+                  <SettingsPanel />
+                )}
+              </Suspense>
+            </div>
           </ErrorBoundary>
         </main>
 

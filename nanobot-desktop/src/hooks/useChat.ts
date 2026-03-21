@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Message, SessionMessagePayload, SessionInfo, Attachment } from "../types";
+import type { Message, SessionMessagePayload, SessionInfo, Attachment, AgentStatusEvent } from "../types";
 import { now, HISTORY_BATCH } from "../utils/helpers";
 
 const DEFAULT_MODELS = [
@@ -29,6 +29,7 @@ export function useChat(sessions: SessionInfo[]) {
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyEnd, setHistoryEnd] = useState(false);
+  const [subagentStatuses, setSubagentStatuses] = useState<Record<string, AgentStatusEvent>>({});
 
   const chatListRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
@@ -44,6 +45,24 @@ export function useChat(sessions: SessionInfo[]) {
   useEffect(() => {
     localStorage.setItem("nanobot-chat-font-size", String(chatFontSize));
   }, [chatFontSize]);
+
+  // Listen for agent status events
+  useEffect(() => {
+    const unlisten = (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      return await listen<AgentStatusEvent>("agent-status", (event) => {
+        const payload = event.payload;
+        console.log("Agent Status Event:", payload);
+        setSubagentStatuses((prev) => ({
+          ...prev,
+          [payload.agent_id]: payload
+        }));
+      });
+    })();
+    return () => {
+      unlisten.then(u => u());
+    };
+  }, []);
 
   const modelList = useMemo(() => {
     const seen = new Set(DEFAULT_MODELS);
@@ -235,6 +254,16 @@ export function useChat(sessions: SessionInfo[]) {
     }
   }, [lastSelectedFolder]);
 
+  const cancelSubagent = useCallback(async (agentId: string) => {
+    try {
+      await invoke("cancel_subagent", { agentId });
+      // We don't need to manually update state here, 
+      // the backend will emit a "cancelled" or "completed" status event.
+    } catch (err) {
+      console.error("Failed to cancel subagent", err);
+    }
+  }, []);
+
   return {
     messages, setMessages, input, setInput: handleInputChange, sending,
     currentSession, setCurrentSession: switchSession,
@@ -249,5 +278,6 @@ export function useChat(sessions: SessionInfo[]) {
     loadHistoryChunk,    handleHistoryScroll,
     sendMessage, handleInputKeyDown,
     attachments, addAttachment, removeAttachment,
+    subagentStatuses, cancelSubagent,
   };
 }

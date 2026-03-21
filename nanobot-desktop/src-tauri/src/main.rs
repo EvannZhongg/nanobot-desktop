@@ -525,6 +525,15 @@ fn spawn_reader(
                 let line = pending[..split_at].trim_end().to_string();
                 pending = pending[split_at + 1..].to_string();
                 if !line.trim().is_empty() {
+                    if line.contains("__STATUS__") {
+                        if let Some(pos) = line.find("__STATUS__") {
+                            let json_part = &line[pos + 10..];
+                            if let Ok(payload) = serde_json::from_str::<Value>(json_part) {
+                                let _ = app.emit("agent-status", payload);
+                                continue;
+                            }
+                        }
+                    }
                     emit_log(&app, &kind, line, &stream);
                 }
             }
@@ -1298,6 +1307,29 @@ async fn send_agent_message(
     Ok(cleaned.trim().to_string())
 }
 
+#[tauri::command]
+async fn cancel_subagent(app: AppHandle, agent_id: String) -> Result<(), String> {
+    emit_log(&app, "agent", format!("Cancelling subagent {}", agent_id), "stdout");
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut cmd = base_command(&app);
+        cmd.args([
+            "-m", "nanobot", "agent", 
+            "--cancel-subagent", &agent_id
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+        let output = cmd.output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn truncate_line(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         return s.to_string();
@@ -1445,6 +1477,7 @@ fn main() {
             start_process,
             stop_process,
             send_agent_message,
+            cancel_subagent,
             oauth::start_browser_oauth,
             oauth::start_device_oauth,
             oauth::poll_device_oauth,
