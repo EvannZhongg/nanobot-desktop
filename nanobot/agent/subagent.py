@@ -68,6 +68,11 @@ class SubagentManager:
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         
+        # Guard: max concurrent subagents
+        MAX_CONCURRENT = 5
+        if len(self._running_tasks) >= MAX_CONCURRENT:
+            return f"Error: Maximum of {MAX_CONCURRENT} concurrent subagents reached. Wait for existing tasks to complete."
+        
         origin = {
             "channel": origin_channel,
             "chat_id": origin_chat_id,
@@ -85,6 +90,13 @@ class SubagentManager:
         logger.info(f"Spawned subagent [{task_id}]: {display_label}")
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
     
+    def stop(self, task_id: str) -> bool:
+        """Stop a running subagent task."""
+        if task_id in self._running_tasks:
+            self._running_tasks[task_id].cancel()
+            return True
+        return False
+
     async def _run_subagent(
         self,
         task_id: str,
@@ -94,9 +106,20 @@ class SubagentManager:
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")
+        chat_id = f"{origin['channel']}:{origin['chat_id']}"
         
         try:
-            # Build subagent tools (no message tool, no spawn tool)
+            # Emit starting status
+            from nanobot.bus.events import AgentStatusEvent
+            await self.bus.publish_status(AgentStatusEvent(
+                agent_id=f"subagent:{task_id}",
+                chat_id=chat_id,
+                status="progress",
+                message=f"Starting subagent task: {label}",
+                metadata={"label": label, "task": task}
+            ))
+
+            # Build subagent tools (allow spawn tool for hierarchical delegation)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
             tools.register(ReadFileTool(allowed_dir=allowed_dir))
@@ -110,6 +133,12 @@ class SubagentManager:
             tools.register(WebSearchTool(api_key=self.brave_api_key))
             tools.register(WebFetchTool())
             
+            # Allow spawning other subagents
+            from nanobot.agent.tools.spawn import SpawnTool
+            spawn_tool = SpawnTool(manager=self)
+            spawn_tool.set_context(origin['channel'], origin['chat_id'])
+            tools.register(spawn_tool)
+            
             # Build messages with subagent-specific prompt
             system_prompt = self._build_subagent_prompt(task)
             messages: list[dict[str, Any]] = [
@@ -118,18 +147,31 @@ class SubagentManager:
             ]
             
             # Run agent loop (limited iterations)
-            max_iterations = 15
+            max_iterations = 20  # Increased from 15
             iteration = 0
-            final_result: str | None = None
+            final_content: str | None = None
             
             while iteration < max_iterations:
                 iteration += 1
                 
+                # Emit thinking status
+                await self.bus.publish_status(AgentStatusEvent(
+                    agent_id=f"subagent:{task_id}",
+                    chat_id=chat_id,
+                    status="thinking",
+                    message=f"Subagent working... (iteration {iteration})",
+                ))
+
                 response = await self.provider.chat(
                     messages=messages,
                     tools=tools.get_definitions(),
                     model=self.model,
                 )
+                
+                # Early exit on error responses (e.g., circuit breaker tripped)
+                if response.finish_reason == "error":
+                    final_content = response.content or "LLM returned an error."
+                    break
                 
                 if response.has_tool_calls:
                     # Add assistant message with tool calls
@@ -154,6 +196,17 @@ class SubagentManager:
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments)
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
+                        
+                        # Emit tool_call status
+                        await self.bus.publish_status(AgentStatusEvent(
+                            agent_id=f"subagent:{task_id}",
+                            chat_id=chat_id,
+                            status="tool_call",
+                            message=f"Executing tool: {tool_call.name}",
+                            tool_name=tool_call.name,
+                            tool_args=tool_call.arguments,
+                        ))
+
                         result = await tools.execute(tool_call.name, tool_call.arguments)
                         messages.append({
                             "role": "tool",
@@ -162,18 +215,44 @@ class SubagentManager:
                             "content": result,
                         })
                 else:
-                    final_result = response.content
+                    final_content = response.content
                     break
             
-            if final_result is None:
-                final_result = "Task completed but no final response was generated."
+            final_result = final_content or "Task completed but no final response was generated."
             
             logger.info(f"Subagent [{task_id}] completed successfully")
+            
+            # Emit completed status
+            await self.bus.publish_status(AgentStatusEvent(
+                agent_id=f"subagent:{task_id}",
+                chat_id=chat_id,
+                status="completed",
+                message="Task completed successfully.",
+            ))
+
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
             
+        except asyncio.CancelledError:
+            logger.warning(f"Subagent [{task_id}] was cancelled")
+            await self.bus.publish_status(AgentStatusEvent(
+                agent_id=f"subagent:{task_id}",
+                chat_id=chat_id,
+                status="error",
+                message="Task was cancelled.",
+            ))
+            raise
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error(f"Subagent [{task_id}] failed: {e}")
+            
+            # Emit error status
+            await self.bus.publish_status(AgentStatusEvent(
+                agent_id=f"subagent:{task_id}",
+                chat_id=chat_id,
+                status="error",
+                message=error_msg,
+            ))
+
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
     
     async def _announce_result(
@@ -211,33 +290,21 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
         return f"""# Subagent
-
-You are a subagent spawned by the main agent to complete a specific task.
-
-## Your Task
-{task}
-
+ 
+You are a subagent spawned to complete a specific task.
+ 
 ## Rules
-1. Stay focused - complete only the assigned task, nothing else
+1. Stay focused - complete only the assigned task
 2. Your final response will be reported back to the main agent
-3. Do not initiate conversations or take on side tasks
-4. Be concise but informative in your findings
-
-## What You Can Do
-- Read and write files in the workspace
-- Execute shell commands
-- Search the web and fetch web pages
-- Complete the task thoroughly
-
-## What You Cannot Do
-- Send messages directly to users (no message tool available)
-- Spawn other subagents
-- Access the main agent's conversation history
-
+3. Be concise but informative in your findings
+ 
+## Capabilities
+Files (read/write/list), Shell, Web search/fetch, Spawn sub-subagents
+ 
 ## Workspace
-Your workspace is at: {self.workspace}
-
-When you have completed the task, provide a clear summary of your findings or actions."""
+{self.workspace}
+ 
+Provide a clear summary when done."""
     
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""

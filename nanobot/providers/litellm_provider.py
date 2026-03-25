@@ -11,6 +11,11 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
 
+from nanobot.utils.network import CircuitBreaker, with_breaker
+
+# Global circuit breaker for LLM provider (5 failures, 60s recovery)
+llm_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60.0)
+
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
@@ -33,8 +38,6 @@ class LiteLLMProvider(LLMProvider):
         self.extra_headers = extra_headers or {}
         
         # Detect gateway / local deployment.
-        # provider_name (from config key) is the primary signal;
-        # api_key / api_base are fallback for auto-detection.
         self._gateway = find_gateway(provider_name, api_key, api_base)
         
         # Configure environment variables
@@ -44,11 +47,16 @@ class LiteLLMProvider(LLMProvider):
         if api_base:
             litellm.api_base = api_base
         
-        # Disable LiteLLM logging noise
+        # Network Stability Settings
+        litellm.num_retries = 3
+        litellm.request_timeout = 60
         litellm.suppress_debug_info = True
-        # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
-    
+
+        # Connection keep-alive headers for persistent connections
+        if not self.extra_headers.get("Connection"):
+            self.extra_headers["Connection"] = "keep-alive"
+
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
         spec = self._gateway or find_by_model(model)
@@ -61,34 +69,30 @@ class LiteLLMProvider(LLMProvider):
         else:
             os.environ.setdefault(spec.env_key, api_key)
 
-        # Resolve env_extras placeholders:
-        #   {api_key}  → user's API key
-        #   {api_base} → user's api_base, falling back to spec.default_api_base
+        # Resolve env_extras placeholders
         effective_base = api_base or spec.default_api_base
         for env_name, env_val in spec.env_extras:
             resolved = env_val.replace("{api_key}", api_key)
             resolved = resolved.replace("{api_base}", effective_base)
             os.environ.setdefault(env_name, resolved)
-    
+
     def _resolve_model(self, model: str) -> str:
         """Resolve model name by applying provider/gateway prefixes."""
         if self._gateway:
-            # Gateway mode: apply gateway prefix, skip provider-specific prefixes
             prefix = self._gateway.litellm_prefix
             if self._gateway.strip_model_prefix:
                 model = model.split("/")[-1]
             if prefix and not model.startswith(f"{prefix}/"):
                 model = f"{prefix}/{model}"
             return model
-        
-        # Standard mode: auto-prefix for known providers
+
         spec = find_by_model(model)
         if spec and spec.litellm_prefix:
             if not any(model.startswith(s) for s in spec.skip_prefixes):
                 model = f"{spec.litellm_prefix}/{model}"
-        
+
         return model
-    
+
     def _apply_model_overrides(self, model: str, kwargs: dict[str, Any]) -> None:
         """Apply model-specific parameter overrides from the registry."""
         model_lower = model.lower()
@@ -98,6 +102,11 @@ class LiteLLMProvider(LLMProvider):
                 if pattern in model_lower:
                     kwargs.update(overrides)
                     return
+
+    @with_breaker(llm_breaker)
+    async def _do_completion(self, kwargs: dict[str, Any]) -> Any:
+        """Internal method to trigger completion with circuit breaker."""
+        return await acompletion(**kwargs)
     
     async def chat(
         self,
@@ -109,16 +118,6 @@ class LiteLLMProvider(LLMProvider):
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
-        
-        Args:
-            messages: List of message dicts with 'role' and 'content'.
-            tools: Optional list of tool definitions in OpenAI format.
-            model: Model identifier (e.g., 'anthropic/claude-sonnet-4-5').
-            max_tokens: Maximum tokens in response.
-            temperature: Sampling temperature.
-        
-        Returns:
-            LLMResponse with content and/or tool calls.
         """
         model = self._resolve_model(model or self.default_model)
         
@@ -129,37 +128,30 @@ class LiteLLMProvider(LLMProvider):
             "temperature": temperature,
         }
         
-        # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
-        
-        # Pass api_key directly — more reliable than env vars alone
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        
-        # Pass api_base for custom endpoints
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
-        
-        # Pass extra headers (e.g. APP-Code for AiHubMix)
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
-        
+        if self.api_key: kwargs["api_key"] = self.api_key
+        if self.api_base: kwargs["api_base"] = self.api_base
+        if self.extra_headers: kwargs["extra_headers"] = self.extra_headers
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         
         try:
-            response = await acompletion(**kwargs)
+            response = await self._do_completion(kwargs)
             return self._parse_response(response)
         except Exception as e:
-            # Return error as content for graceful handling
             return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
+                content=f"LLM Error (Breaker: {llm_breaker.state}): {str(e)}",
                 finish_reason="error",
             )
     
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
+        if not response.choices:
+            return LLMResponse(
+                content="Empty response from LLM (no choices returned).",
+                finish_reason="error",
+            )
         choice = response.choices[0]
         message = choice.message
         

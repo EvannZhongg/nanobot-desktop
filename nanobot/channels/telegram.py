@@ -6,7 +6,11 @@ import asyncio
 import re
 from typing import TYPE_CHECKING
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:
+    import logging
+    logger = logging.getLogger("nanobot")
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -14,6 +18,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
+from nanobot.utils.network import async_retry
 
 if TYPE_CHECKING:
     from nanobot.session.manager import SessionManager
@@ -196,23 +201,30 @@ class TelegramChannel(BaseChannel):
             chat_id = int(msg.chat_id)
             # Convert markdown to Telegram HTML
             html_content = _markdown_to_telegram_html(msg.content)
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=html_content,
-                parse_mode="HTML"
-            )
+            
+            async def _do_send():
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html_content,
+                    parse_mode="HTML"
+                )
+            
+            await async_retry(_do_send, name="Telegram send")
+            
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
             # Fallback to plain text if HTML parsing fails
-            logger.warning(f"HTML parse failed, falling back to plain text: {e}")
+            logger.warning(f"HTML parse failed or send failed, falling back to plain text: {e}")
             try:
-                await self._app.bot.send_message(
-                    chat_id=int(msg.chat_id),
-                    text=msg.content
-                )
+                async def _do_send_plain():
+                    await self._app.bot.send_message(
+                        chat_id=int(msg.chat_id),
+                        text=msg.content
+                    )
+                await async_retry(_do_send_plain, name="Telegram send plain")
             except Exception as e2:
-                logger.error(f"Error sending Telegram message: {e2}")
+                logger.error(f"Error sending Telegram message after retries: {e2}")
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
@@ -305,39 +317,52 @@ class TelegramChannel(BaseChannel):
             media_file = message.document
             media_type = "file"
         
-        # Download media if present
-        if media_file and self._app:
-            try:
-                file = await self._app.bot.get_file(media_file.file_id)
-                ext = self._get_extension(media_type, getattr(media_file, 'mime_type', None))
-                
-                # Save to workspace/media/
-                from pathlib import Path
-                media_dir = Path.home() / ".nanobot" / "media"
-                media_dir.mkdir(parents=True, exist_ok=True)
-                
-                file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
-                await file.download_to_drive(str(file_path))
-                
-                media_paths.append(str(file_path))
-                
-                # Handle voice transcription
-                if media_type == "voice" or media_type == "audio":
-                    from nanobot.providers.transcription import GroqTranscriptionProvider
-                    transcriber = GroqTranscriptionProvider(api_key=self.groq_api_key)
-                    transcription = await transcriber.transcribe(file_path)
-                    if transcription:
-                        logger.info(f"Transcribed {media_type}: {transcription[:50]}...")
-                        content_parts.append(f"[transcription: {transcription}]")
-                    else:
-                        content_parts.append(f"[{media_type}: {file_path}]")
-                else:
-                    content_parts.append(f"[{media_type}: {file_path}]")
+        # Download media if present (Limit: 20MB, Timeout: 30s)
+        MAX_FILE_SIZE = 20 * 1024 * 1024
+        app = self._app
+        if media_file and app and media_type:
+            # Check size before download
+            file_size = getattr(media_file, 'file_size', 0)
+            if file_size > MAX_FILE_SIZE:
+                logger.warning(f"Skipping Large Media: {file_size} bytes")
+                content_parts.append(f"[skipped large {media_type}]")
+            else:
+                try:
+                    m_file = media_file
+                    m_type: str = media_type
                     
-                logger.debug(f"Downloaded {media_type} to {file_path}")
-            except Exception as e:
-                logger.error(f"Failed to download media: {e}")
-                content_parts.append(f"[{media_type}: download failed]")
+                    async def _download_task():
+                        file = await asyncio.wait_for(app.bot.get_file(m_file.file_id), timeout=10.0)
+                        ext = self._get_extension(m_type, getattr(m_file, 'mime_type', None))
+                        
+                        from pathlib import Path
+                        media_dir = Path.home() / ".nanobot" / "media"
+                        media_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        f_path = media_dir / f"{m_file.file_id[:16]}{ext}"
+                        await asyncio.wait_for(file.download_to_drive(str(f_path)), timeout=30.0)
+                        return f_path
+                    
+                    # Call the download with retry
+                    downloaded_path = await async_retry(_download_task, name=f"Telegram media download ({media_type})")
+                    media_paths.append(str(downloaded_path))
+                    
+                    # Handle voice transcription
+                    if media_type == "voice" or media_type == "audio":
+                        from nanobot.providers.transcription import GroqTranscriptionProvider
+                        transcriber = GroqTranscriptionProvider(api_key=self.groq_api_key)
+                        transcription = await transcriber.transcribe(downloaded_path)
+                        if transcription:
+                            logger.info(f"Transcribed {media_type}: {transcription[:50]}...")
+                            content_parts.append(f"[transcription: {transcription}]")
+                        else:
+                            content_parts.append(f"[{media_type}: {downloaded_path}]")
+                    else:
+                        content_parts.append(f"[{media_type}: {downloaded_path}]")
+                    logger.debug(f"Downloaded {media_type} to {downloaded_path}")
+                except Exception as e:
+                    logger.error(f"Failed to process media: {e}")
+                    content_parts.append(f"[{media_type}: processing failed]")
         
         content = "\n".join(content_parts) if content_parts else "[empty message]"
         

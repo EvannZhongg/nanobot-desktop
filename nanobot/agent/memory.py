@@ -26,7 +26,10 @@ class MemoryStore:
         """Read today's memory notes."""
         today_file = self.get_today_file()
         if today_file.exists():
-            return today_file.read_text(encoding="utf-8")
+            try:
+                return today_file.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, IOError):
+                return ""
         return ""
     
     def append_today(self, content: str) -> None:
@@ -46,7 +49,10 @@ class MemoryStore:
     def read_long_term(self) -> str:
         """Read long-term memory (MEMORY.md)."""
         if self.memory_file.exists():
-            return self.memory_file.read_text(encoding="utf-8")
+            try:
+                return self.memory_file.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, IOError):
+                return ""
         return ""
     
     def write_long_term(self, content: str) -> None:
@@ -74,8 +80,11 @@ class MemoryStore:
             file_path = self.memory_dir / f"{date_str}.md"
             
             if file_path.exists():
-                content = file_path.read_text(encoding="utf-8")
-                memories.append(content)
+                try:
+                    content = file_path.read_text(encoding="utf-8")
+                    memories.append(content)
+                except (UnicodeDecodeError, IOError):
+                    pass  # Skip corrupted memory files
         
         return "\n\n---\n\n".join(memories)
     

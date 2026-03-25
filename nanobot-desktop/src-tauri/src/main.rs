@@ -2,15 +2,19 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+use tauri::menu::Menu;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+
+mod oauth;
+mod indexer;
+mod vector;
+mod tray;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -21,19 +25,54 @@ const MAX_LOG_LINES: usize = 2000;
 static PRINT_LOGS: OnceLock<bool> = OnceLock::new();
 static SCAN_PROCS: OnceLock<bool> = OnceLock::new();
 
+fn get_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[derive(Default)]
-struct ProcState {
-    agent: Option<Child>,
-    gateway: Option<Child>,
-    logs: VecDeque<LogPayload>,
-    emit_logs: bool,
+pub struct ProcState {
+    pub agent: Option<Child>,
+    pub gateway: Option<Child>,
+    pub active_generation: Option<u32>,
+    pub logs: VecDeque<LogPayload>,
+    pub emit_logs: bool,
+    pub subagent_registry: HashMap<String, SubagentInfo>,
+    pub status_cache: Option<(StatusPayload, std::time::Instant)>,
+    pub restart_count: HashMap<String, u32>,
+    pub last_restart: HashMap<String, std::time::Instant>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub agent_id: String,
+    pub chat_id: String,
+    pub status: String,
+    pub message: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_args: Option<Value>,
+    pub tool_history: Vec<ToolExecution>,
+    pub start_time: u64,
+    pub last_update: u64,
+    pub pid: Option<u32>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecution {
+    pub name: String,
+    pub args: Value,
+    pub timestamp: u64,
 }
 
 #[derive(Serialize, Clone)]
-struct LogPayload {
-    kind: String,
-    line: String,
-    stream: String,
+pub struct LogPayload {
+    pub kind: String,
+    pub line: String,
+    pub stream: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -41,10 +80,10 @@ struct ProcessExitPayload {
     kind: String,
 }
 
-#[derive(Serialize)]
-struct StatusPayload {
-    agent: bool,
-    gateway: bool,
+#[derive(Serialize, Clone)]
+pub struct StatusPayload {
+    pub agent: String,
+    pub gateway: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -351,6 +390,13 @@ fn base_command(app: &AppHandle) -> Command {
     cmd.env("COLUMNS", "120");
     cmd.env("NO_COLOR", "1");
     cmd.env("RICH_DISABLE", "1");
+    // Forward proxy settings from system environment if set (never hardcode)
+    if let Some(proxy) = std::env::var_os("HTTP_PROXY").or_else(|| std::env::var_os("http_proxy")) {
+        cmd.env("HTTP_PROXY", &proxy);
+    }
+    if let Some(proxy) = std::env::var_os("HTTPS_PROXY").or_else(|| std::env::var_os("https_proxy")) {
+        cmd.env("HTTPS_PROXY", &proxy);
+    }
     if use_embedded {
         if let Some(pyhome) = embedded_python_root(app) {
             let normalized = normalize_path(&pyhome);
@@ -464,7 +510,14 @@ fn validate_memory_name(name: &str) -> Result<(), String> {
     Err("invalid memory name".to_string())
 }
 
-fn emit_log(app: &AppHandle, kind: &str, line: String, stream: &str) {
+pub(crate) fn emit_log(app: &AppHandle, kind: &str, mut line: String, stream: &str) {
+    // Prevent IPC congestion by truncating extremely long lines
+    const MAX_IPC_LINE: usize = 10_000;
+    if line.len() > MAX_IPC_LINE {
+        line.truncate(MAX_IPC_LINE);
+        line.push_str("... [truncated]");
+    }
+
     let payload = LogPayload {
         kind: kind.to_string(),
         line,
@@ -506,7 +559,7 @@ fn spawn_reader(
 
             loop {
                 let split_at = pending
-                    .find(|c| c == '\n' || c == '\r')
+                    .find(['\n', '\r'])
                     .unwrap_or(usize::MAX);
                 if split_at == usize::MAX {
                     break;
@@ -514,6 +567,89 @@ fn spawn_reader(
                 let line = pending[..split_at].trim_end().to_string();
                 pending = pending[split_at + 1..].to_string();
                 if !line.trim().is_empty() {
+                    if line.contains("__STATUS__") {
+                        if let Some(pos) = line.find("__STATUS__") {
+                            let json_part = &line[pos + 10..];
+                            if let Ok(payload) = serde_json::from_str::<Value>(json_part) {
+                                // Update registry
+                                if let Some(state_handle) = app.try_state::<Arc<Mutex<ProcState>>>() {
+                                    let state = state_handle.inner().clone();
+                                    let mut s = state.lock().unwrap();
+                                    
+                                    if let (Some(agent_id), Some(status)) = (
+                                        payload.get("agent_id").and_then(|v| v.as_str()),
+                                        payload.get("status").and_then(|v| v.as_str())
+                                    ) {
+                                        let entry = s.subagent_registry.entry(agent_id.to_string()).or_insert_with(|| SubagentInfo {
+                                            agent_id: agent_id.to_string(),
+                                            chat_id: payload.get("chat_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                                            status: status.to_string(),
+                                            message: payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            tool_name: payload.get("tool_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            tool_args: payload.get("tool_args").cloned(),
+                                            tool_history: Vec::new(),
+                                            start_time: get_now_ms(),
+                                            last_update: get_now_ms(),
+                                            pid: payload.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32),
+                                        });
+                                        
+                                        entry.status = status.to_string();
+                                        entry.message = payload.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                        entry.last_update = get_now_ms();
+                                        if let Some(pid) = payload.get("pid").and_then(|v| v.as_u64()) {
+                                            entry.pid = Some(pid as u32);
+                                        }
+                                        
+                                        if status == "tool_call" {
+                                            if let (Some(name), Some(args)) = (
+                                                payload.get("tool_name").and_then(|v| v.as_str()),
+                                                payload.get("tool_args")
+                                            ) {
+                                                entry.tool_name = Some(name.to_string());
+                                                entry.tool_args = Some(args.clone());
+                                                entry.tool_history.push(ToolExecution {
+                                                    name: name.to_string(),
+                                                    args: args.clone(),
+                                                    timestamp: get_now_ms(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    let _ = app.emit("agent-status", payload.clone());
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if line.contains("Spawned subagent") && line.contains("PID:") {
+                        static RE: OnceLock<regex::Regex> = OnceLock::new();
+                        let re = RE.get_or_init(|| regex::Regex::new(r"Spawned subagent ([a-f0-9-]+).*PID: (\d+)").unwrap());
+                        if let Some(caps) = re.captures(&line) {
+                            let agent_id = caps.get(1).map(|m| m.as_str().to_string());
+                            let pid = caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+                            
+                            if let (Some(id), Some(p)) = (agent_id, pid) {
+                                let id_str: String = id;
+                                if let Some(state_handle) = app.try_state::<Arc<Mutex<ProcState>>>() {
+                                    let mut s = state_handle.lock().unwrap();
+                                    let entry = s.subagent_registry.entry(id_str.clone()).or_insert_with(|| SubagentInfo {
+                                        agent_id: id_str.clone(),
+                                        chat_id: "".to_string(),
+                                        status: "thinking".to_string(),
+                                        message: None,
+                                        tool_name: None,
+                                        tool_args: None,
+                                        tool_history: Vec::new(),
+                                        start_time: get_now_ms(),
+                                        last_update: get_now_ms(),
+                                        pid: Some(p),
+                                    });
+                                    entry.pid = Some(p);
+                                }
+                            }
+                        }
+                    }
                     emit_log(&app, &kind, line, &stream);
                 }
             }
@@ -540,7 +676,7 @@ fn spawn_reader(
     });
 }
 
-fn refresh_child(child: &mut Option<Child>) -> bool {
+pub fn refresh_child(child: &mut Option<Child>) -> bool {
     if let Some(proc) = child.as_mut() {
         if let Ok(Some(_)) = proc.try_wait() {
             *child = None;
@@ -562,15 +698,15 @@ fn kill_process_tree(pid: u32) {
     {
         // Best-effort cross-platform cleanup
         let _ = Command::new("pkill")
-            .args(["-TERM", "-P", &pid.to_string()])
+            .args(["-9", "-P", &pid.to_string()])
             .status();
         let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args(["-9", &pid.to_string()])
             .status();
     }
 }
 
-fn kill_matching_processes(kind: &str) {
+pub fn kill_matching_processes(kind: &str) {
     #[cfg(windows)]
     {
         let pattern = match kind {
@@ -621,15 +757,15 @@ fn is_matching_process_running(kind: &str) -> bool {
     }
     #[cfg(not(windows))]
     {
-        return Command::new("pgrep")
+        Command::new("pgrep")
             .args(["-f", pattern])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
 }
 
-fn stop_all_processes(state: &Arc<Mutex<ProcState>>) {
+pub fn stop_all_processes(state: &Arc<Mutex<ProcState>>) {
     if let Ok(mut guard) = state.lock() {
         if let Some(mut child) = guard.agent.take() {
             let pid = child.id();
@@ -756,25 +892,43 @@ fn start_process_inner(
 #[tauri::command]
 fn get_status(state: State<Arc<Mutex<ProcState>>>) -> StatusPayload {
     let mut guard = state.lock().expect("state");
+    
+    // Check cache (2 second ttl)
+    if let Some((cached, instant)) = &guard.status_cache {
+        if instant.elapsed() < std::time::Duration::from_secs(2) {
+            return cached.clone();
+        }
+    }
+
     let agent_managed = refresh_child(&mut guard.agent);
     let gateway_managed = refresh_child(&mut guard.gateway);
     let scan = *SCAN_PROCS
         .get_or_init(|| std::env::var_os("NANOBOT_SCAN_PROCS").is_some());
-    let agent = if agent_managed {
-        true
-    } else if scan {
-        is_matching_process_running("agent")
-    } else {
-        false
+    
+    let agent = if agent_managed { true } 
+               else if scan { is_matching_process_running("agent") } 
+               else { false };
+               
+    let gateway = if gateway_managed { true } 
+                 else if scan { is_matching_process_running("gateway") } 
+                 else { false };
+                 
+    let payload = StatusPayload { 
+        agent: if agent { "Running".to_string() } else {
+            let count = guard.restart_count.get("agent").cloned().unwrap_or(0);
+            if count > 0 && count < 8 { "Restarting".to_string() } 
+            else if count >= 8 { "Crashed".to_string() } 
+            else { "Offline".to_string() }
+        },
+        gateway: if gateway { "Running".to_string() } else {
+            let count = guard.restart_count.get("gateway").cloned().unwrap_or(0);
+            if count > 0 && count < 8 { "Restarting".to_string() } 
+            else if count >= 8 { "Crashed".to_string() } 
+            else { "Offline".to_string() }
+        },
     };
-    let gateway = if gateway_managed {
-        true
-    } else if scan {
-        is_matching_process_running("gateway")
-    } else {
-        false
-    };
-    StatusPayload { agent, gateway }
+    guard.status_cache = Some((payload.clone(), std::time::Instant::now()));
+    payload
 }
 
 #[tauri::command]
@@ -791,8 +945,12 @@ fn set_log_streaming(enabled: bool, state: State<Arc<Mutex<ProcState>>>) {
 }
 
 #[tauri::command]
-fn list_workspace_skills() -> Result<Vec<SkillInfo>, String> {
-    let dir = workspace_skills_dir();
+fn list_workspace_skills(path: Option<String>) -> Result<Vec<SkillInfo>, String> {
+    let dir = if let Some(p) = path {
+        PathBuf::from(p)
+    } else {
+        workspace_skills_dir()
+    };
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -995,68 +1153,116 @@ fn read_session_file(
     query: Option<&str>,
 ) -> Result<Vec<SessionMessagePayload>, String> {
     let path = sessions_dir().join(name);
-    let data = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let mut rows: Vec<SessionMessagePayload> = Vec::new();
-    let lower_query = query.map(|q| q.to_lowercase());
-
-    for (idx, line) in data.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let val: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if val.get("_type").is_some() {
-            continue;
-        }
-        let content = val
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        if content.is_empty() {
-            continue;
-        }
-        if let Some(q) = lower_query.as_ref() {
-            if !content.to_lowercase().contains(q) {
-                continue;
-            }
-        }
-        let role = val
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("system")
-            .to_string();
-        let created_at = val
-            .get("timestamp")
-            .or_else(|| val.get("created_at"))
-            .or_else(|| val.get("updated_at"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
-        rows.push(SessionMessagePayload {
-            id: format!("{}-{}", created_at, idx),
-            role,
-            content,
-            created_at,
-            line: idx,
-        });
-    }
-
-    let total = rows.len();
-    if offset >= total {
+    if !path.exists() {
         return Ok(Vec::new());
     }
-    let end = total.saturating_sub(offset);
-    let start = end.saturating_sub(limit);
-    let slice = rows[start..end].to_vec();
-    Ok(slice)
+
+    use std::io::{Seek, SeekFrom, Read};
+    let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    
+    let mut rows: Vec<SessionMessagePayload> = Vec::new();
+    let lower_query = query.as_ref().map(|q| q.to_lowercase());
+
+    // If there is a query, we MUST read the whole file currently because index-less search is global.
+    // However, if no query, we can seek from the end.
+    if lower_query.is_some() {
+        let reader = std::io::BufReader::new(file);
+        use std::io::BufRead;
+        for (idx, line_res) in reader.lines().enumerate() {
+            let line = line_res.map_err(|e| e.to_string())?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.contains("\"_type\":") { continue; }
+            if let Some(q) = lower_query.as_ref() {
+                if !trimmed.to_lowercase().contains(q) { continue; }
+            }
+            if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+                rows.push(parse_session_row(val, idx));
+            }
+        }
+        let total = rows.len();
+        if offset >= total { return Ok(Vec::new()); }
+        let end = total.saturating_sub(offset);
+        let start = end.saturating_sub(limit);
+        return Ok(rows[start..end].to_vec());
+    }
+
+    // High performance SEEK-FROM-END logic for pagination (No Query)
+    let mut cursor = file_len;
+    let mut buffer = vec![0u8; 8192];
+    let mut leftovers = Vec::new();
+    let mut lines_collected = Vec::new();
+    let target_count = limit + offset;
+
+    while cursor > 0 && lines_collected.len() < target_count {
+        let read_size = std::cmp::min(cursor, buffer.len() as u64);
+        cursor -= read_size;
+        file.seek(SeekFrom::Start(cursor)).map_err(|e| e.to_string())?;
+        file.read_exact(&mut buffer[..read_size as usize]).map_err(|e| e.to_string())?;
+
+        let mut pos = read_size as usize;
+        while pos > 0 {
+            pos -= 1;
+            if buffer[pos] == b'\n' {
+                let mut line_bytes = buffer[pos + 1..read_size as usize].to_vec();
+                line_bytes.extend_from_slice(&leftovers);
+                if !line_bytes.is_empty() {
+                    lines_collected.push(line_bytes);
+                }
+                leftovers.clear();
+                // If we have enough lines, we can stop
+                if lines_collected.len() >= target_count { break; }
+            }
+        }
+        if lines_collected.len() < target_count {
+            let mut new_leftovers = buffer[0..pos + (if pos == 0 && buffer[0] != b'\n' {1} else {0})].to_vec();
+            new_leftovers.extend_from_slice(&leftovers);
+            leftovers = new_leftovers;
+        }
+    }
+    // Handle very first line
+    if !leftovers.is_empty() && lines_collected.len() < target_count {
+        lines_collected.push(leftovers);
+    }
+
+    // Now lines_collected has messages in REVERSE order from the end of the file.
+    // Skip 'offset' and take 'limit'
+    let subset = lines_collected.iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|bytes| {
+            let line = String::from_utf8_lossy(bytes);
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.contains("\"_type\":") { return None; }
+            serde_json::from_str::<Value>(trimmed).ok()
+        })
+        .enumerate()
+        .map(|(i, val)| parse_session_row(val, offset + i))
+        .collect::<Vec<_>>();
+
+    // We want to return them in chronological order for the frontend
+    let mut result = subset;
+    result.reverse();
+    Ok(result)
+}
+
+fn parse_session_row(val: Value, idx: usize) -> SessionMessagePayload {
+    let content = val.get("content").and_then(Value::as_str).unwrap_or("").to_string();
+    let role = val.get("role").and_then(Value::as_str).unwrap_or("system").to_string();
+    let created_at = val.get("timestamp")
+        .or_else(|| val.get("created_at"))
+        .or_else(|| val.get("updated_at"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+
+    SessionMessagePayload {
+        id: format!("{}-{}", created_at, idx),
+        role,
+        content,
+        created_at,
+        line: idx,
+    }
 }
 
 #[tauri::command]
@@ -1080,7 +1286,7 @@ fn list_sessions() -> Result<Vec<SessionInfo>, String> {
             continue;
         }
         let metadata = entry.metadata().ok();
-        let size = metadata.as_ref().and_then(|m| Some(m.len()));
+        let size = metadata.as_ref().map(|m| m.len());
         let modified = metadata
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -1232,6 +1438,8 @@ async fn send_agent_message(
     app: AppHandle,
     message: String,
     session_id: String,
+    model: Option<String>,
+    media: Option<Vec<String>>,
 ) -> Result<String, String> {
     emit_log(
         &app,
@@ -1239,31 +1447,74 @@ async fn send_agent_message(
         format!("User: {}", truncate_line(&message, 200)),
         "stdout",
     );
-    let app_handle = app.clone();
-    let combined = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let mut cmd = base_command(&app_handle);
-        cmd.args([
-            "-m",
-            "nanobot",
-            "agent",
-            "--message",
-            &message,
-            "--session",
-            &session_id,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+    
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app_inner = app.clone();
+    
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = base_command(&app_inner);
+        let mut cli_args = vec![
+            "-m".to_string(),
+            "nanobot".to_string(),
+            "agent".to_string(),
+            "chat".to_string(),
+            "--message".to_string(),
+            message,
+            "--session".to_string(),
+            session_id,
+        ];
+        if let Some(m) = model {
+            cli_args.push("--model".to_string());
+            cli_args.push(m);
+        }
+        if let Some(md) = media {
+            for m in md {
+                cli_args.push("--attachment".to_string());
+                cli_args.push(m);
+            }
+        }
+        
+        cmd.args(cli_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
 
-        let output = cmd.output().map_err(|e| e.to_string())?;
-        let mut combined = String::new();
-        combined.push_str(&String::from_utf8_lossy(&output.stdout));
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        match cmd.spawn() {
+            Ok(child) => {
+                let pid = child.id();
+                if let Ok(mut guard) = app_inner.state::<Arc<Mutex<ProcState>>>().lock() {
+                    guard.active_generation = Some(pid);
+                }
 
-        Ok(combined)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+                let output = child.wait_with_output();
+                
+                if let Ok(mut guard) = app_inner.state::<Arc<Mutex<ProcState>>>().lock() {
+                    if guard.active_generation == Some(pid) {
+                        guard.active_generation = None;
+                    }
+                }
+
+                let _ = app_inner.emit("process-exit", ProcessExitPayload { kind: "agent-task".to_string() });
+
+                match output {
+                    Ok(out) => {
+                        let mut combined = String::new();
+                        combined.push_str(&String::from_utf8_lossy(&out.stdout));
+                        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                        let _ = tx.send(Ok(combined));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e.to_string()));
+            }
+        }
+    });
+
+    let combined = rx.recv().map_err(|e| e.to_string())??;
 
     let cleaned = strip_ansi(combined.as_str());
     for line in cleaned.lines() {
@@ -1272,6 +1523,72 @@ async fn send_agent_message(
         }
     }
     Ok(cleaned.trim().to_string())
+}
+
+#[tauri::command]
+async fn cancel_all_subagents(state: tauri::State<'_, Arc<Mutex<ProcState>>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "poisoned")?;
+    let pids: Vec<u32> = guard.subagent_registry.values().filter_map(|s| s.pid).collect();
+    
+    for pid in pids {
+        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    }
+    
+    // Update all active ones to error
+    for info in guard.subagent_registry.values_mut() {
+        if info.status != "completed" && info.status != "error" {
+            info.status = "error".to_string();
+            info.message = Some("All tasks stopped".to_string());
+        }
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn cancel_subagent(app: AppHandle, agent_id: String) -> Result<(), String> {
+    emit_log(&app, "agent", format!("Cancelling subagent {}", agent_id), "stdout");
+    
+    // 1. Try stored PID first (force kill)
+    if let Ok(guard) = app.state::<Arc<Mutex<ProcState>>>().lock() {
+        if let Some(info) = guard.subagent_registry.get(&agent_id) {
+            if let Some(pid) = info.pid {
+                let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            }
+        }
+    }
+
+    // 2. Also try the normal CLI cancel way in background
+    let app_for_bg = app.clone();
+    let agent_id_for_bg = agent_id.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut cmd = base_command(&app_for_bg);
+        cmd.args([
+            "-m", "nanobot", "agent", 
+            "--cancel-subagent", &agent_id_for_bg
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+        let output = cmd.output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 3. Update registry status
+    if let Ok(mut guard) = app.state::<Arc<Mutex<ProcState>>>().lock() {
+        if let Some(info) = guard.subagent_registry.get_mut(&agent_id) {
+            info.status = "error".to_string();
+            info.message = Some("Cancelled by user".to_string());
+        }
+    }
+    
+    Ok(())
 }
 
 fn truncate_line(s: &str, max_len: usize) -> String {
@@ -1286,10 +1603,16 @@ fn strip_ansi(input: &str) -> String {
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
-            while let Some(next) = chars.next() {
-                if ('@'..='~').contains(&next) {
-                    break;
+            // Potential ANSI escape sequence ESC [ ... <char>
+            if let Some('[') = chars.peek() {
+                let _ = chars.next(); // consume '['
+                while let Some(c) = chars.next() {
+                    if (0x40..=0x7E).contains(&(c as u8)) {
+                        break;
+                    }
                 }
+            } else {
+                // Just ESC followed by something else, skip the ESC
             }
         } else {
             out.push(ch);
@@ -1298,12 +1621,45 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+#[tauri::command]
+fn stop_generation(state: State<Arc<Mutex<ProcState>>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "state lock".to_string())?;
+    if let Some(pid) = guard.active_generation.take() {
+        kill_process_tree(pid);
+        Ok(())
+    } else {
+        Err("no active generation".to_string())
+    }
+}
+
+#[tauri::command]
+fn get_subagent_registry(state: State<'_, Arc<Mutex<ProcState>>>) -> HashMap<String, SubagentInfo> {
+    let s = state.lock().unwrap();
+    s.subagent_registry.clone()
+}
+
+#[tauri::command]
+fn clear_subagent_registry(state: State<'_, Arc<Mutex<ProcState>>>) {
+    let mut s = state.lock().unwrap();
+    s.subagent_registry.clear();
+}
+
 fn main() {
     let state = Arc::new(Mutex::new(ProcState::default()));
+    let db_path = nanobot_home().join("vector.db");
+    let db_conn = vector::init_db(db_path.to_str().unwrap()).expect("Failed to init SQLite db");
+    let db_state = vector::DbState(Mutex::new(db_conn));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .manage(db_state)
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Ok(app_menu) = Menu::default(app.handle()) {
+                let _ = app.set_menu(app_menu);
+            }
+
             if let Some(window) = app.get_webview_window("main") {
                 let icon_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("icons")
@@ -1313,55 +1669,82 @@ fn main() {
                 }
             }
 
-            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
+            tray::init(app.handle())?;
 
-            if let Some(tray) = app.tray_by_id("main") {
-                tray.set_menu(Some(menu))?;
-                tray.on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.hide();
-                        }
-                    }
-                    "quit" => {
-                        // Ensure child processes exit with the desktop app.
-                        let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
-                        stop_all_processes(&state);
-                        // Best-effort cleanup for any lingering nanobot processes.
-                        kill_matching_processes("agent");
-                        kill_matching_processes("gateway");
-                        app.exit(0);
-                    }
-                    _ => {}
-                });
-                tray.on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button,
-                        button_state,
-                        ..
-                    } = event
+            let handle = app.handle();
+            let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
+            let handle_clone = handle.clone();
+            let state_clone = state.clone();
+
+            // Watchdog Thread: Monitor and restart processes with exponential backoff
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    
+                    let mut restart_agent = false;
+                    let mut restart_gateway = false;
+                    
                     {
-                        if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                            if let Some(window) = tray.app_handle().get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                        if let Ok(mut s) = state_clone.lock() {
+                            // --- Agent watchdog ---
+                            if s.agent.is_none() && is_matching_process_running("agent") == false {
+                                let count = s.restart_count.get("agent").cloned().unwrap_or(0);
+                                if count < 8 {
+                                    // Exponential backoff: 10s, 20s, 40s, 80s, 160s (cap 300s)
+                                    let backoff_secs = std::cmp::min(10u64 * 2u64.pow(count), 300);
+                                    let now = std::time::Instant::now();
+                                    let last = s.last_restart.get("agent").cloned();
+                                    if last.map(|l| now.duration_since(l).as_secs() > backoff_secs).unwrap_or(true) {
+                                        restart_agent = true;
+                                        s.restart_count.insert("agent".to_string(), count + 1);
+                                        s.last_restart.insert("agent".to_string(), now);
+                                    }
+                                }
+                                // Update status cache to show Crashed/Restarting
+                                s.status_cache = None; // Force refresh on next get_status
+                            } else if s.agent.is_some() {
+                                s.restart_count.insert("agent".to_string(), 0);
+                            }
+
+                            // --- Gateway watchdog ---
+                            if s.gateway.is_none() && is_matching_process_running("gateway") == false {
+                                let count = s.restart_count.get("gateway").cloned().unwrap_or(0);
+                                if count < 8 {
+                                    let backoff_secs = std::cmp::min(10u64 * 2u64.pow(count), 300);
+                                    let now = std::time::Instant::now();
+                                    let last = s.last_restart.get("gateway").cloned();
+                                    if last.map(|l| now.duration_since(l).as_secs() > backoff_secs).unwrap_or(true) {
+                                        restart_gateway = true;
+                                        s.restart_count.insert("gateway".to_string(), count + 1);
+                                        s.last_restart.insert("gateway".to_string(), now);
+                                    }
+                                }
+                                s.status_cache = None;
+                            } else if s.gateway.is_some() {
+                                s.restart_count.insert("gateway".to_string(), 0);
+                            }
+
+                            // --- Round 18: Cap log buffer memory ---
+                            if s.logs.len() > MAX_LOG_LINES {
+                                let excess = s.logs.len() - MAX_LOG_LINES;
+                                for _ in 0..excess {
+                                    s.logs.pop_front();
+                                }
                             }
                         }
                     }
-                });
-            }
 
-            let state = app.state::<Arc<Mutex<ProcState>>>().inner().clone();
-            let handle = app.handle().clone();
+                    if restart_agent {
+                        emit_log(&handle_clone, "agent", "Watchdog: Restarting agent (exponential backoff)...".to_string(), "stdout");
+                        let _ = start_process_inner("agent", &state_clone, &handle_clone);
+                    }
+                    if restart_gateway {
+                        emit_log(&handle_clone, "gateway", "Watchdog: Restarting gateway (exponential backoff)...".to_string(), "stdout");
+                        let _ = start_process_inner("gateway", &state_clone, &handle_clone);
+                    }
+                }
+            });
+
             if config_path().exists() {
                 let _ = start_process_inner("agent", &state, &handle);
                 let _ = start_process_inner("gateway", &state, &handle);
@@ -1410,7 +1793,18 @@ fn main() {
             delete_cron_job,
             start_process,
             stop_process,
-            send_agent_message
+            send_agent_message,
+            cancel_subagent,
+            cancel_all_subagents,
+            stop_generation,
+            get_subagent_registry,
+            clear_subagent_registry,
+            oauth::start_browser_oauth,
+            oauth::start_device_oauth,
+            oauth::poll_device_oauth,
+            indexer::search_workspace,
+            vector::chunk_and_store,
+            vector::search_chunks
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -37,19 +37,25 @@ class SkillsLoader:
         
         # Workspace skills (highest priority)
         if self.workspace_skills.exists():
-            for skill_dir in self.workspace_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists():
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
+            try:
+                for skill_dir in self.workspace_skills.iterdir():
+                    if skill_dir.is_dir():
+                        skill_file = skill_dir / "SKILL.md"
+                        if skill_file.exists():
+                            skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
+            except OSError:
+                pass  # Skip unreadable workspace skills dir
         
         # Built-in skills
         if self.builtin_skills and self.builtin_skills.exists():
-            for skill_dir in self.builtin_skills.iterdir():
-                if skill_dir.is_dir():
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
+            try:
+                for skill_dir in self.builtin_skills.iterdir():
+                    if skill_dir.is_dir():
+                        skill_file = skill_dir / "SKILL.md"
+                        if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
+                            skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
+            except OSError:
+                pass  # Skip unreadable builtin skills dir
         
         # Filter by requirements
         if filter_unavailable:
@@ -69,13 +75,19 @@ class SkillsLoader:
         # Check workspace first
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():
-            return workspace_skill.read_text(encoding="utf-8")
+            try:
+                return workspace_skill.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, IOError):
+                return None
         
         # Check built-in
         if self.builtin_skills:
             builtin_skill = self.builtin_skills / name / "SKILL.md"
             if builtin_skill.exists():
-                return builtin_skill.read_text(encoding="utf-8")
+                try:
+                    return builtin_skill.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, IOError):
+                    return None
         
         return None
     
@@ -100,10 +112,10 @@ class SkillsLoader:
     
     def build_skills_summary(self) -> str:
         """
-        Build a summary of all skills (name, description, path, availability).
+        Build a compact summary of all skills.
         
-        This is used for progressive loading - the agent can read the full
-        skill content using read_file when needed.
+        Uses attribute-style XML to minimize token usage while
+        preserving all needed metadata for progressive loading.
         
         Returns:
             XML-formatted skills summary.
@@ -113,7 +125,7 @@ class SkillsLoader:
             return ""
         
         def escape_xml(s: str) -> str:
-            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
         
         lines = ["<skills>"]
         for s in all_skills:
@@ -123,18 +135,12 @@ class SkillsLoader:
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
             
-            lines.append(f"  <skill available=\"{str(available).lower()}\">")
-            lines.append(f"    <name>{name}</name>")
-            lines.append(f"    <description>{desc}</description>")
-            lines.append(f"    <location>{path}</location>")
-            
-            # Show missing requirements for unavailable skills
+            attrs = f'name="{name}" available="{str(available).lower()}" path="{path}"'
             if not available:
                 missing = self._get_missing_requirements(skill_meta)
                 if missing:
-                    lines.append(f"    <requires>{escape_xml(missing)}</requires>")
-            
-            lines.append(f"  </skill>")
+                    attrs += f' requires="{escape_xml(missing)}"'
+            lines.append(f'  <skill {attrs}>{desc}</skill>')
         lines.append("</skills>")
         
         return "\n".join(lines)
@@ -211,18 +217,24 @@ class SkillsLoader:
             Metadata dict or None.
         """
         content = self.load_skill(name)
-        if not content:
+        if not content or not content.startswith("---"):
             return None
         
-        if content.startswith("---"):
-            match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                # Simple YAML parsing
-                metadata = {}
-                for line in match.group(1).split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip().strip('"\'')
-                return metadata
+        match = re.search(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+        if not match:
+            return None
         
-        return None
+        # Simple YAML-like parsing for the frontmatter
+        metadata = {}
+        for line in match.group(1).split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue  # Skip empty lines and comments
+            if ":" in line:
+                key, value = line.split(":", 1)
+                # Clean up key and value, removing quotes and whitespace
+                k = key.strip().lower()
+                v = value.strip().strip('"\'')
+                metadata[k] = v
+        
+        return metadata

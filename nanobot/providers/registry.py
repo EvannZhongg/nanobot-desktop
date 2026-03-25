@@ -241,15 +241,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         ),
     ),
 
-    # MiniMax: needs "minimax/" prefix for LiteLLM routing.
-    # Uses OpenAI-compatible API at api.minimax.io/v1.
+    # MiniMax: uses anthropic-messages format via nexus proxy.
+    # The nexus proxy wraps MiniMax as anthropic API, so we use "anthropic/" prefix.
     ProviderSpec(
         name="minimax",
         keywords=("minimax",),
         env_key="MINIMAX_API_KEY",
         display_name="MiniMax",
-        litellm_prefix="minimax",            # MiniMax-M2.1 → minimax/MiniMax-M2.1
-        skip_prefixes=("minimax/", "openrouter/"),
+        litellm_prefix="anthropic",          # MiniMax-M2.7 → anthropic/MiniMax-M2.7
+        skip_prefixes=("anthropic/", "minimax/", "openrouter/"),
         env_extras=(),
         is_gateway=False,
         is_local=False,

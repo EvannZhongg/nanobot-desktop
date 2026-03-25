@@ -137,19 +137,23 @@ class SessionManager:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
         
-        with open(path, "w") as f:
-            # Write metadata first
-            metadata_line = {
-                "_type": "metadata",
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
-            }
-            f.write(json.dumps(metadata_line) + "\n")
-            
-            # Write messages
-            for msg in session.messages:
-                f.write(json.dumps(msg) + "\n")
+        try:
+            with open(path, "w") as f:
+                # Write metadata first
+                metadata_line = {
+                    "_type": "metadata",
+                    "key": session.key,
+                    "created_at": session.created_at.isoformat(),
+                    "updated_at": session.updated_at.isoformat(),
+                    "metadata": session.metadata
+                }
+                f.write(json.dumps(metadata_line) + "\n")
+                
+                # Write messages
+                for msg in session.messages:
+                    f.write(json.dumps(msg) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to save session {session.key}: {e}")
         
         self._cache[session.key] = session
     
@@ -169,7 +173,11 @@ class SessionManager:
         # Remove file
         path = self._get_session_path(key)
         if path.exists():
-            path.unlink()
+            try:
+                path.unlink()
+            except Exception as e:
+                logger.error(f"Failed to delete session file {key}: {e}")
+                return False
             return True
         return False
     
@@ -191,7 +199,7 @@ class SessionManager:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
                             sessions.append({
-                                "key": path.stem.replace("_", ":"),
+                                "key": data.get("key", path.stem.replace("_", ":")),
                                 "created_at": data.get("created_at"),
                                 "updated_at": data.get("updated_at"),
                                 "path": str(path)

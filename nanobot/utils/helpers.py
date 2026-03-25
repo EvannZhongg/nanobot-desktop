@@ -72,7 +72,8 @@ def safe_filename(name: str) -> str:
     unsafe = '<>:"/\\|?*'
     for char in unsafe:
         name = name.replace(char, "_")
-    return name.strip()
+    result = name.strip()
+    return result if result else "unnamed"
 
 
 def parse_session_key(key: str) -> tuple[str, str]:

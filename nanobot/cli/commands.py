@@ -264,21 +264,21 @@ This file stores important information that should persist across sessions.
     skills_dir.mkdir(exist_ok=True)
 
 
-def _make_provider(config):
+def _make_provider(config, override_model: str | None = None):
     """Create LiteLLMProvider from config. Exits if no API key found."""
     from nanobot.providers.litellm_provider import LiteLLMProvider
-    p = config.get_provider()
-    model = config.agents.defaults.model
+    p = config.get_provider(override_model)
+    model = override_model or config.agents.defaults.model
     if not (p and p.api_key) and not model.startswith("bedrock/"):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
+        api_base=config.get_api_base(override_model),
         default_model=model,
         extra_headers=p.extra_headers if p else None,
-        provider_name=config.get_provider_name(),
+        provider_name=config.get_provider_name(override_model),
     )
 
 
@@ -405,9 +405,11 @@ def gateway(
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:default", "--session", "-s", help="Session ID"),
+    model: str = typer.Option(None, "--model", help="Model to use (overrides default config)"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
     daemon: bool = typer.Option(False, "--daemon/--no-daemon", help="Run agent loop as a background service"),
+    media: list[str] = typer.Option(None, "--media", help="Media files to attach"),
 ):
     """Interact with the agent directly."""
     from nanobot.config.loader import load_config
@@ -418,7 +420,7 @@ def agent(
     config = load_config()
     
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = _make_provider(config, override_model=model)
 
     if logs:
         logger.enable("nanobot")
@@ -429,6 +431,7 @@ def agent(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
+        model=model or config.agents.defaults.model,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -485,7 +488,7 @@ def agent(
                         break
                     
                     with _thinking_ctx():
-                        response = await agent_loop.process_direct(user_input, session_id)
+                        response = await agent_loop.process_direct(user_input, session_id, media=media)
                     _print_agent_response(response, render_markdown=markdown)
                 except KeyboardInterrupt:
                     _restore_terminal()

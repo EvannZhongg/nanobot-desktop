@@ -1,0 +1,1 @@
+/Users/joe/Documents/指示词宝库/soul/SOUL.md

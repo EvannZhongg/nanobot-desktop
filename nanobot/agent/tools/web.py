@@ -109,7 +109,10 @@ class WebFetchTool(Tool):
         self.max_chars = max_chars
     
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
-        from readability import Document
+        try:
+            from readability import Document
+        except ImportError:
+            return json.dumps({"error": "readability not installed. Run: pip install readability-lxml", "url": url})
 
         max_chars = maxChars or self.max_chars
 

@@ -9,9 +9,24 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22.1"
+ignore = "0.4.25"
+notify = "8.2.0"
+open = "5.3.3"
+rand = "0.8"
+reqwest = { version = "0.13.2", features = ["form", "json"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+tauri-plugin-dialog = "2.6.0"
+text-splitter = "0.29.3"
+tiny_http = "0.12.0"
+url = "2.5.8"
+uuid = { version = "1.22.0", features = ["v4"] }
+tokio = { version = "1", features = ["full"] }
+regex = "1.10"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

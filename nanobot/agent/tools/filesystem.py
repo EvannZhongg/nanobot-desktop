@@ -9,8 +9,10 @@ from nanobot.agent.tools.base import Tool
 def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
     """Resolve path and optionally enforce directory restriction."""
     resolved = Path(path).expanduser().resolve()
-    if allowed_dir and not str(resolved).startswith(str(allowed_dir.resolve())):
-        raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+    if allowed_dir:
+        allowed_resolved = allowed_dir.resolve()
+        if not resolved.is_relative_to(allowed_resolved):
+            raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
 
 
@@ -49,7 +51,11 @@ class ReadFileTool(Tool):
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
             
-            content = file_path.read_text(encoding="utf-8")
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                size = file_path.stat().st_size
+                return f"Error: Binary file ({size} bytes). Use exec('xxd {path} | head') to inspect."
             return content
         except PermissionError as e:
             return f"Error: {e}"

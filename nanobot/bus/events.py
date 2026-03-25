@@ -35,3 +35,15 @@ class OutboundMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class AgentStatusEvent:
+    """Event representing a status update from an agent (or subagent)."""
+    
+    agent_id: str  # e.g., "main", or "subagent:task_id"
+    chat_id: str
+    status: str  # "thinking", "tool_call", "progress", "completed", "error"
+    message: str | None = None
+    tool_name: str | None = None
+    tool_args: dict[str, Any] | None = None
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: dict[str, Any] = field(default_factory=dict)

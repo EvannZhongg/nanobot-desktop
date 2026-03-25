@@ -105,44 +105,47 @@ class CronService:
         if not self._store:
             return
         
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        data = {
-            "version": self._store.version,
-            "jobs": [
-                {
-                    "id": j.id,
-                    "name": j.name,
-                    "enabled": j.enabled,
-                    "schedule": {
-                        "kind": j.schedule.kind,
-                        "atMs": j.schedule.at_ms,
-                        "everyMs": j.schedule.every_ms,
-                        "expr": j.schedule.expr,
-                        "tz": j.schedule.tz,
-                    },
-                    "payload": {
-                        "kind": j.payload.kind,
-                        "message": j.payload.message,
-                        "deliver": j.payload.deliver,
-                        "channel": j.payload.channel,
-                        "to": j.payload.to,
-                    },
-                    "state": {
-                        "nextRunAtMs": j.state.next_run_at_ms,
-                        "lastRunAtMs": j.state.last_run_at_ms,
-                        "lastStatus": j.state.last_status,
-                        "lastError": j.state.last_error,
-                    },
-                    "createdAtMs": j.created_at_ms,
-                    "updatedAtMs": j.updated_at_ms,
-                    "deleteAfterRun": j.delete_after_run,
-                }
-                for j in self._store.jobs
-            ]
-        }
-        
-        self.store_path.write_text(json.dumps(data, indent=2))
+        try:
+            self.store_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            data = {
+                "version": self._store.version,
+                "jobs": [
+                    {
+                        "id": j.id,
+                        "name": j.name,
+                        "enabled": j.enabled,
+                        "schedule": {
+                            "kind": j.schedule.kind,
+                            "atMs": j.schedule.at_ms,
+                            "everyMs": j.schedule.every_ms,
+                            "expr": j.schedule.expr,
+                            "tz": j.schedule.tz,
+                        },
+                        "payload": {
+                            "kind": j.payload.kind,
+                            "message": j.payload.message,
+                            "deliver": j.payload.deliver,
+                            "channel": j.payload.channel,
+                            "to": j.payload.to,
+                        },
+                        "state": {
+                            "nextRunAtMs": j.state.next_run_at_ms,
+                            "lastRunAtMs": j.state.last_run_at_ms,
+                            "lastStatus": j.state.last_status,
+                            "lastError": j.state.last_error,
+                        },
+                        "createdAtMs": j.created_at_ms,
+                        "updatedAtMs": j.updated_at_ms,
+                        "deleteAfterRun": j.delete_after_run,
+                    }
+                    for j in self._store.jobs
+                ]
+            }
+            
+            self.store_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            logger.error(f"Failed to save cron store: {e}")
     
     async def start(self) -> None:
         """Start the cron service."""
@@ -195,6 +198,16 @@ class CronService:
                 await self._on_timer()
         
         self._timer_task = asyncio.create_task(tick())
+        
+        # Log unhandled exceptions from the timer task
+        def _on_task_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                logger.error(f"Cron timer task failed: {exc}")
+        
+        self._timer_task.add_done_callback(_on_task_done)
     
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
@@ -215,6 +228,8 @@ class CronService:
     
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
+        if not self._store:
+            return
         start_ms = _now_ms()
         logger.info(f"Cron: executing job '{job.name}' ({job.id})")
         

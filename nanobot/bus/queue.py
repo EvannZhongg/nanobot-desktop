@@ -19,7 +19,9 @@ class MessageBus:
     def __init__(self):
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        self.status: asyncio.Queue["AgentStatusEvent"] = asyncio.Queue()
         self._outbound_subscribers: dict[str, list[Callable[[OutboundMessage], Awaitable[None]]]] = {}
+        self._status_subscribers: list[Callable[["AgentStatusEvent"], Awaitable[None]]] = []
         self._running = False
     
     async def publish_inbound(self, msg: InboundMessage) -> None:
@@ -38,6 +40,36 @@ class MessageBus:
         """Consume the next outbound message (blocks until available)."""
         return await self.outbound.get()
     
+    async def publish_status(self, event: "AgentStatusEvent") -> None:
+        """Publish a status event from an agent."""
+        await self.status.put(event)
+        
+        # Log for Tauri bridge to pick up
+        try:
+            import json
+            from dataclasses import asdict
+            data = asdict(event)
+            # Serialize datetime to ISO string
+            if "timestamp" in data and data["timestamp"]:
+                data["timestamp"] = data["timestamp"].isoformat()
+            logger.info(f"__STATUS__{json.dumps(data)}")
+        except Exception as e:
+            logger.error(f"Error logging status event: {e}")
+
+        # Also dispatch to direct subscribers
+        for callback in self._status_subscribers:
+            try:
+                await callback(event)
+            except Exception as e:
+                logger.error(f"Error dispatching status event: {e}")
+
+    def subscribe_status(
+        self, 
+        callback: Callable[["AgentStatusEvent"], Awaitable[None]]
+    ) -> None:
+        """Subscribe to all agent status events."""
+        self._status_subscribers.append(callback)
+
     def subscribe_outbound(
         self, 
         channel: str, 
@@ -65,6 +97,8 @@ class MessageBus:
                         logger.error(f"Error dispatching to {msg.channel}: {e}")
             except asyncio.TimeoutError:
                 continue
+            except asyncio.CancelledError:
+                break
     
     def stop(self) -> None:
         """Stop the dispatcher loop."""
